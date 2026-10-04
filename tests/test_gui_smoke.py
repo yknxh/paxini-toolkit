@@ -147,3 +147,45 @@ def test_sim_calibration_tab(tmp_path):
     pump(0.3)
     assert not c.cal_btn.isEnabled()
     w.close()
+
+
+def test_sim_gauge_overlay():
+    """게이지 패널: 시뮬레이션 게이지 + 시뮬레이션 센서 → 라이브 그래프에 겹쳐 그리고 지연을 표시한다."""
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    from paxkit.config import Config
+    from paxkit.gui.gauge_panel import SIM_GAUGE
+    from paxkit.gui.main_window import MainWindow
+
+    def pump(seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            app.processEvents()
+            time.sleep(0.01)
+
+    app = QApplication.instance() or QApplication([])
+    w = MainWindow(Config.load())
+    d, g = w.device, w.gauge
+    g.port_combo.setCurrentIndex(g.port_combo.findData(SIM_GAUGE))
+    g.connect_btn.click()
+    d.port_combo.setCurrentIndex(d.port_combo.findData("시뮬레이션: S1813E"))
+    d.connect_sensor()
+    gauge, sensor = g.gauge, d.sensor
+    assert gauge.load == sensor.transport.load_N   # 같은 하중을 읽는다
+    pump(4.5)
+    x, y = w.live.gauge_curve.getData()
+    assert x is not None and len(x) > 20 and max(y) > 5
+    assert len(x) % 2 == 0 and abs(x[-1]) < 0.1 and (y[0::2] == y[1::2]).all()   # 계단: 값마다 두 점, 끝은 지금
+    assert g.lbl_value.text().endswith(" N") and "게이지" in w.live.gauge_value.text()
+    assert w.live.lag_value is not None and abs(w.live.lag_value) < 0.06
+    d.disconnect_sensor()
+    sensor.join(3)
+    pump(0.3)
+    assert gauge.load is None   # 센서 해제 → 게이지는 자체 하중으로
+    g.connect_btn.click()
+    assert g.gauge is None and not gauge.is_alive()
+    x, _ = w.live.gauge_curve.getData()
+    assert x is None or len(x) == 0
+    w.close()

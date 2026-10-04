@@ -88,6 +88,10 @@ class SimUsbTransport:
         t = self.clock.now() - (self._t0 or 0.0)
         return max(0.0, math.sin(2 * math.pi * t / self.period)) * self.peak_raw
 
+    def load_N(self, _t_wall: float = 0.0) -> float:
+        """지금 누르는 실제 하중 (N, 캘리브레이션 영점과 무관). 시뮬레이션 게이지(`SimGauge.load`)용."""
+        return self._press() / 10.0 if self.is_open else 0.0
+
     def _payload(self, n: int) -> bytes:
         z = max(0.0, self._press() - self.zero)
         p = bytearray(n)
