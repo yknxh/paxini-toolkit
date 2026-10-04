@@ -4,6 +4,7 @@
 
 연결 → 지정 시간 동안 수신 → 해제. 버전·센서 타입·수신 속도·요청 간격·최근 값을 출력한다.
 --calibrate: 중간에 캘리브레이션 명령을 보낸다 (센서 영점이 바뀌므로 아무것도 누르지 않은 상태에서만).
+             결과(응답·전후 합력)를 출력하고 `data/calibration/history.jsonl`에 남긴다.
 --record: 수신하는 동안 `data/logs/`에 PXSR 형식 CSV로 기록하고, 행 수 = 프레임 수인지 확인한다.
 """
 from __future__ import annotations
@@ -16,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from paxkit.calibration import OUTCOME_TEXT, CalibrationRun, append_history  # noqa: E402
 from paxkit.device.transport import SerialTransport, default_sensor_port, list_serial_ports  # noqa: E402
 from paxkit.device.usb import UsbSensor  # noqa: E402
 from paxkit.recording import CsvRecorder  # noqa: E402
@@ -57,10 +59,19 @@ def main() -> int:
     if a.record:
         rec = CsvRecorder(s, info={"mode": "usb", "port": port, "tool": "usb_live_check"})
         rec.start()   # 첫 프레임 전에 시작해도 된다 (파일은 첫 행 뒤에 생긴다)
+    cal = None
     if a.calibrate:
         time.sleep(a.seconds / 2)
-        s.calibrate()
-        time.sleep(a.seconds / 2)
+        cal = CalibrationRun(s, {"mode": "usb", "port": port, "tool": "usb_live_check"}).start()
+        t_cal = time.monotonic()
+        cal.wait(timeout=a.seconds / 2)
+        time.sleep(max(0.0, a.seconds / 2 - (time.monotonic() - t_cal)))
+        if cal.result.done:
+            append_history(cal.result)
+            if rec is not None:
+                d = cal.result.to_dict()
+                d.pop("requested")
+                rec.note_event("calibration", cal.result.requested, **d)
     else:
         time.sleep(a.seconds)
     s.disconnect()
@@ -80,6 +91,12 @@ def main() -> int:
               f"1% {q[0] * 1e3:.2f}, 99% {q[98] * 1e3:.2f}, 최대 {max(gaps) * 1e3:.2f}")
         f = frames[-1]
         print(f"마지막 합력 raw {f.combine} → N {[v / 10 for v in f.combine]}")
+    if cal is not None:
+        r = cal.result
+        ms = lambda x, y: "-" if x is None or y is None else f"{(y - x) * 1e3:.1f} ms"
+        print(f"캘리브레이션: {OUTCOME_TEXT.get(r.outcome, r.outcome)}, status {r.status}, 기능 코드 {r.function_code}")
+        print(f"  버튼→전송 {ms(r.requested, r.sent)}, 전송→응답 {ms(r.sent, r.acked)}")
+        print(f"  합력 raw 평균 전 {r.before} → 후 {r.after}")
     if rec is not None:
         n_rows = rec.path.read_bytes().count(b"\n") - 1 if rec.path.exists() else 0
         print(f"기록 {rec.path} : 행 {n_rows}, 기록기 {rec.line_count}, 프레임 {len(frames)} "

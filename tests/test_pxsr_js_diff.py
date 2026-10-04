@@ -125,3 +125,16 @@ def test_usb_parser_equal_js(js_result):
             assert got == r["y"], f"시퀀스 {i}"
             assert p.buf.hex() == r["buf"], f"시퀀스 {i} 버퍼"
             assert ([warn] if warn else []) == r["warn"], f"시퀀스 {i} 경고"
+
+
+def test_hand_calibration_equal_js():
+    """HAND `setHandCalibration`과 체크섬 `$9` (리더는 P1b 이후, 명령만 먼저 비교)."""
+    rng = random.Random(20261005)
+    arrays = [[]] + [[rng.randrange(256) for _ in range(rng.randint(1, 40))] for _ in range(300)]
+    harness = r"""
+    const h = ka0();
+    OUTPUT = {cal: Buffer.from(h.setHandCalibration()).toString('hex'), sums: INPUT.arrays.map(a => $9(a))};
+    """
+    out = pxsr_js.run(harness, {"arrays": arrays}, prelude=pxsr_js.hand_source())
+    assert codec.hand_set_calibration().hex() == out["cal"]
+    assert [codec.hand_checksum(a) for a in arrays] == out["sums"]

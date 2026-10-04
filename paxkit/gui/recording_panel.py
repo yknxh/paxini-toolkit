@@ -12,9 +12,6 @@ from PySide6.QtWidgets import QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLine
 from ..paths import data_path
 from ..recording import CsvRecorder
 
-CALIBRATION_EVENTS = ("calibration_sent", "calibration_ack")
-
-
 class RecordingPanel(QGroupBox):
     def __init__(self, directory: Optional[Path] = None) -> None:
         super().__init__("데이터 로깅")
@@ -56,11 +53,13 @@ class RecordingPanel(QGroupBox):
         self.sensor_info = dict(info or {})
         self._refresh()
 
-    def on_sensor_event(self, kind: str, info: dict) -> None:
+    def note_calibration(self, result) -> None:
+        """캘리브레이션 탭에서 1회가 끝나면 (CalibrationResult). 기록 중이면 사이드카 `events`에 남긴다."""
         rec = self.recorder
-        if rec is not None and rec.active and kind in CALIBRATION_EVENTS:
-            extra = {k: v for k, v in info.items() if k != "t"}
-            rec.note_event(kind, info.get("t"), **extra)
+        if rec is not None and rec.active:
+            d = result.to_dict()
+            d.pop("requested")
+            rec.note_event("calibration", result.requested, **d)
 
     # ── 버튼 ──
     def _toggle(self) -> None:

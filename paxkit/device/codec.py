@@ -3,7 +3,7 @@
 PXSR v1.0.7 렌더러 번들 `dist/index.3bcb906d.js`를 1:1로 옮긴다. 출처 offset은 그 파일의 바이트 위치.
 PXSR 코드가 이상해 보여도 고치지 않는다 (CLAUDE.md 최우선 원칙).
 
-지금은 USB 직결(`Na0`) 부분만 있다. HAND(`ka0`)는 P1b 이후 추가.
+지금은 USB 직결(`Na0`) 부분과 HAND(`ka0`) 캘리브레이션 명령만 있다. HAND 나머지는 P1b 이후 추가.
 """
 from __future__ import annotations
 
@@ -194,3 +194,22 @@ class UsbParser:
             self.buf = b""
             return y
         return y   # default: 버퍼를 비우지 않는다 (PXSR 그대로)
+
+
+# ── HAND 보드 `ka0` (~415602) — 지금은 캘리브레이션 명령만 (리더는 P1b 이후) ──
+HAND_HEADER = [85, 170]   # `t`
+
+
+def hand_checksum(data) -> int:
+    """`$9` (~338987): `(합 & 255 ^ 255) + 1 & 255`. 빈 배열도 오류 없이 0."""
+    e = 0
+    for b in data:
+        e = (e + b) & 255
+    return ((e ^ 255) + 1) & 255
+
+
+def hand_set_calibration() -> bytes:
+    """`setHandCalibration` (~417809): `[...t, 0, 23, ...A2(2,2), ...A2(1,2), 1]` + `$9`. serviceID 없음."""
+    m = [*HAND_HEADER, 0, 23, *_a2(2, 2), *_a2(1, 2), 1]
+    m.append(hand_checksum(m))
+    return bytes(m)

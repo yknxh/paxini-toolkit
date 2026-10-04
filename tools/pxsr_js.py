@@ -73,6 +73,13 @@ def usb_source() -> str:
     return stubs + "".join("const " + p + ";" for p in parts)
 
 
+def hand_source() -> str:
+    """HAND 보드 코드 `ka0`와 체크섬 `$9`를 `usb_source()` 뒤에 붙인다 (지금은 캘리브레이션 명령 비교용)."""
+    src = BUNDLE.read_text(encoding="utf-8")
+    parts = [extract(r"\$9=t=>", src), extract(r"ka0=\(\)=>", src)]
+    return usb_source() + "".join("const " + p + ";" for p in parts)
+
+
 def csv_source() -> str:
     """데이터 로깅 기준 코드: PXSR이 쓰는 `csv-writer`(설치본 node_modules 그대로)와 파일명 함수 `rs0`."""
     src = BUNDLE.read_text(encoding="utf-8")

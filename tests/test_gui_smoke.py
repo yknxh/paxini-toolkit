@@ -98,3 +98,52 @@ def test_sim_recording(tmp_path):
     assert rec2.path.exists() and rec2.path != rec.path
     assert not r.start_btn.isEnabled()
     w.close()
+
+
+def test_sim_calibration_tab(tmp_path):
+    """캘리브레이션 탭: 시뮬레이션 센서로 실행 → 결과·실행 기록, 기록 중이면 사이드카 events에 남는다."""
+    import json
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    from paxkit.calibration import read_history
+    from paxkit.config import Config
+    from paxkit.device import codec
+    from paxkit.gui.main_window import MainWindow
+
+    def pump(seconds):
+        end = time.time() + seconds
+        while time.time() < end:
+            app.processEvents()
+            time.sleep(0.01)
+
+    app = QApplication.instance() or QApplication([])
+    w = MainWindow(Config.load())
+    d, r, c = w.device, w.recording, w.calibration
+    r.directory = tmp_path
+    c.history_file = tmp_path / "history.jsonl"
+    assert not c.cal_btn.isEnabled()
+    d.port_combo.setCurrentIndex(d.port_combo.findData("시뮬레이션: S1813E"))
+    d.connect_sensor()
+    pump(1.0)
+    assert c.cal_btn.isEnabled()
+    r.start_btn.click()
+    pump(0.3)
+    c.cal_btn.click()
+    pump(1.5)
+    assert c.last is not None and c.last.outcome == "ack" and c.history.count() == 1
+    sent = [x for _, x in d.sensor.transport.written if x == codec.usb_set_calibration(3)]
+    assert len(sent) == 1
+    rows = read_history(c.history_file)
+    assert len(rows) == 1 and rows[0]["info"]["port"] == "시뮬레이션: S1813E" and rows[0]["info"]["simulated"]
+    r.start_btn.click()
+    side = json.loads(r.recorder.path.with_suffix(".json").read_text(encoding="utf-8"))
+    ev = [e for e in side["events"] if e["kind"] == "calibration"]
+    assert len(ev) == 1 and ev[0]["outcome"] == "ack"
+    sensor = d.sensor
+    d.disconnect_sensor()
+    sensor.join(3)
+    pump(0.3)
+    assert not c.cal_btn.isEnabled()
+    w.close()

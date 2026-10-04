@@ -61,6 +61,7 @@ class UsbSensor(threading.Thread):
         self.on_event = on_event
         self.buffer = TimeSeriesBuffer(maxlen=120_000, ncols=3)   # combineForce raw (화면용)
         self._sinks: List[Sink] = []
+        self._listeners: List[Callable[[str, dict], None]] = []
         self._on_stop: Dict[Sink, Callable[[], None]] = {}
         self._sink_lock = threading.Lock()
         self._requests: "queue.Queue[Callable[[], Optional[Iterator[float]]]]" = queue.Queue()
@@ -103,7 +104,18 @@ class UsbSensor(threading.Thread):
                 self._sinks.remove(fn)
             self._on_stop.pop(fn, None)
 
+    def add_listener(self, fn: Callable[[str, dict], None]) -> None:
+        """on_event 외에 이벤트를 더 받는다 (캘리브레이션 결과 추적 등). 리더 스레드에서 불린다."""
+        with self._sink_lock:
+            self._listeners.append(fn)
+
+    def remove_listener(self, fn: Callable[[str, dict], None]) -> None:
+        with self._sink_lock:
+            if fn in self._listeners:
+                self._listeners.remove(fn)
+
     def calibrate(self) -> None:
+        """PXSR 캘리브레이션 버튼. PXSR처럼 중복 클릭을 막지 않는다 (두 번 누르면 명령도 두 번)."""
         self._requests.put(self._calibrate)
 
     def disconnect(self) -> None:
@@ -179,11 +191,13 @@ class UsbSensor(threading.Thread):
         self.transport.write(data)
 
     def _event(self, kind: str, **info) -> None:
-        if self.on_event is not None:
+        with self._sink_lock:
+            fns = ([self.on_event] if self.on_event is not None else []) + list(self._listeners)
+        for fn in fns:
             try:
-                self.on_event(kind, info)
+                fn(kind, dict(info))
             except Exception:
-                log.exception("on_event 실패")
+                log.exception("이벤트 처리 실패")
 
     # ── PXSR 로직 ──────────────────────────────────────────────────
     def _get_version(self) -> bytes:
@@ -218,8 +232,11 @@ class UsbSensor(threading.Thread):
             return   # 펌웨어 업그레이드(OTA) 응답. 이 레포는 OTA 명령을 보내지 않는다 (범위 밖)
         a = y.startAddress
         if a == codec.USB_ADDR_CALIBRATION:
+            # PXSR은 응답 상태를 보지 않고 폴링을 재개한다. 실패 표시는 parseUsbData의
+            # 기능 코드 126 + 상태 바이트 ≠ 0 일 때 J3.warning(Setting.failed) 뿐 (위 warning 이벤트).
             self._stop_polling = False
-            self._event("calibration_ack", status=y.status)
+            self._event("calibration_ack", t=self.clock.wall(), status=y.status,
+                        function_code=y.functionCode, failed=y.warning is not None)
             self._send(self._get_type_data())
             return
         if a == codec.USB_ADDR_SET_ID:

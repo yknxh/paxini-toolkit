@@ -1,4 +1,4 @@
-"""장치 패널: 포트 선택, 연결/해제, 캘리브레이션, 센서 상태."""
+"""장치 패널: 포트 선택, 연결/해제, 센서 상태. 캘리브레이션 버튼은 캘리브레이션 탭에 있다."""
 from __future__ import annotations
 
 import time
@@ -39,10 +39,6 @@ class DevicePanel(QWidget):
 
         self.connect_btn = QPushButton("연결")
         self.connect_btn.clicked.connect(self._toggle)
-        self.cal_btn = QPushButton("캘리브레이션")
-        self.cal_btn.setToolTip("PXSR 캘리브레이션 버튼과 같은 명령. 센서를 누르지 않은 상태에서 실행")
-        self.cal_btn.clicked.connect(self._calibrate)
-        self.cal_btn.setEnabled(False)
 
         box = QGroupBox("센서 (USB 직결)")
         form = QFormLayout(box)
@@ -57,7 +53,6 @@ class DevicePanel(QWidget):
         form.addRow("타입", self.lbl_type)
         form.addRow("버전", self.lbl_version)
         form.addRow("수신", self.lbl_rate)
-        form.addRow(self.cal_btn)
 
         self.events = QListWidget()
         lay = QVBoxLayout(self)
@@ -128,10 +123,6 @@ class DevicePanel(QWidget):
             s.disconnect()
             s.join(timeout)
 
-    def _calibrate(self) -> None:
-        if self.sensor is not None and self.sensor.status == "connected":
-            self.sensor.calibrate()
-
     # ── 상태 표시 ──
     def _on_event_gui(self, kind: str, info: dict) -> None:
         t = time.monotonic() - self._t_connect
@@ -140,7 +131,8 @@ class DevicePanel(QWidget):
             "version": f"버전 응답 serviceID {info.get('service_id')}: {info.get('version')}",
             "sensor_type": f"센서 타입 {info.get('sensor')} (taxel {info.get('taxels')})",
             "calibration_sent": "캘리브레이션 명령 전송",
-            "calibration_ack": f"캘리브레이션 응답 (status {info.get('status')})",
+            "calibration_ack": f"캘리브레이션 응답 (status {info.get('status')}"
+                               + (", Setting.failed)" if info.get("failed") else ")"),
             "warning": f"경고: {info.get('message')}",
             "error": f"오류: {info.get('message')}",
             "disconnected": "연결 해제됨",
@@ -155,7 +147,6 @@ class DevicePanel(QWidget):
         s = self.sensor
         if s is None:
             return
-        self.cal_btn.setEnabled(s.status == "connected" and s.is_alive())
         self.lbl_status.setText({"connected": "연결됨", "error": f"오류: {s.error}"}.get(s.status, s.status))
         self.lbl_type.setText(f"{s.sensor_type.label} (taxel {s.sensor_type.forces}), "
                               f"serviceID {s.service_id}, slot {s.slot}")
@@ -167,7 +158,6 @@ class DevicePanel(QWidget):
             self.connect_btn.setText("연결")
             self.connect_btn.setEnabled(True)
             self.port_combo.setEnabled(True)
-            self.cal_btn.setEnabled(False)
             if s.status != "error":
                 self.lbl_status.setText("연결 안 됨")
             self.sensor_changed.emit(None)
