@@ -1,0 +1,35 @@
+# paxkit 설정. 상대경로는 이 파일 기준.
+
+# ── Paxini 센서 ───────────────────────────────────────────────────
+# baudrate는 PXSR 코드에 고정된 값(USB·HAND 921600)을 코드에서 쓰므로 여기서 바꾸지 않는다.
+device:
+  mode: ""                 # usb (센서 1개 직결) | hand (손 보드). TODO: 실기 검증(P1) 후 채움
+  port: ""                 # 예: COM5, /dev/ttyUSB0. TODO: 실기 검증(P1) 후 채움
+
+sensor_types:
+  A:
+    model: S1813E
+    taxels: 31
+    rated_N: 25
+  B:
+    model: S2015E
+    taxels: 52
+    rated_N: 25
+
+# ── Force gauge (ZP-500N, 시리얼) — paxtest config.yaml 실측값 그대로 ──
+gauge:
+  port: COM7               # FTDI USB Serial Port (2026-09-29 확인)
+  baudrate: 2400           # 실측. 8N1
+  mode: stream             # poll: 명령 보내고 응답 읽기 | stream: 게이지가 연속 송신 (실측: 약 10 Hz)
+  poll_command: "D\r"      # poll 모드에서만 사용
+  poll_hz: 50
+  line_terminator: ""      # 실측: 구분자 없음 ("0000.0-000.3-004.9...") → record_regex 로 자른다
+  # 레코드 한 개. N 단위 실측은 고정폭 6글자, 첫 글자가 부호 자리('-' 또는 '0'), 소수 1자리.
+  # 게이지 단위를 kgf 로 바꾸면 "-00.00" 형식이 되므로 "[-+ \\d]\\d{2}\\.\\d{2}" 로 바꾼다.
+  record_regex: "[-+ \\d]\\d{3}\\.\\d"
+  record_len: 6            # 레코드 글자 수. 버퍼 끝의 레코드가 이 길이면 다음 레코드를 기다리지 않고 바로 쓴다
+  line_regex: "([-+]?\\d+(?:\\.\\d+)?)"   # 응답에서 숫자 추출 (첫 그룹)
+  unit_scale: 1.0          # 게이지 단위 → N (kgf면 9.80665). 게이지 표시 단위는 N 으로 설정해 둠
+  invert: true             # 압축(누름)이 + 가 되도록. 실측: 누르면 '-' 로 온다
+  timeout_s: 0.2
+  accuracy_N: 0.1          # ± 정확도 (참고). 실측: 0.5 kg 분동 → 4.9 N (기준 4.90 N), 분해능 0.1 N 이내

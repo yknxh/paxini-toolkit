@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paxkit"
+version = "0.1.0"
+description = "Paxini Gen3 촉각 센서용 비공식 도구 (PXSR 대체 + force gauge 테스트)"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "pyserial>=3.5",
+    "pyyaml>=6.0",
+    "PySide6>=6.6",
+    "pyqtgraph>=0.13",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.gui-scripts]
+paxkit = "paxkit.gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["paxkit*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

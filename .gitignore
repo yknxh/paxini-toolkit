@@ -1,0 +1,18 @@
+# 측정·기록 데이터 (폴더는 코드가 필요할 때 만든다)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
