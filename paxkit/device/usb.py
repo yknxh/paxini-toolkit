@@ -49,7 +49,8 @@ class UsbSensor(threading.Thread):
     """`start()` = PXSR 연결 버튼, `disconnect()` = 연결 해제 버튼, `calibrate()` = 캘리브레이션 버튼.
 
     sink는 PXSR의 데이터 로깅 경로에 해당한다: 1008 응답이 성공할 때마다 Frame 1개.
-    연결 해제를 시작하면 PXSR처럼 기록을 먼저 멈추므로 sink 호출도 그때 멈춘다 (화면 버퍼는 계속).
+    연결 해제를 시작하면 PXSR처럼 기록을 먼저 멈추므로(`G1`) sink 호출도 그때 멈추고
+    sink의 `on_stop`을 부른다 (화면 버퍼는 계속).
     """
 
     def __init__(self, transport, *, clock=None, specification: str = "S1813E",
@@ -60,6 +61,7 @@ class UsbSensor(threading.Thread):
         self.on_event = on_event
         self.buffer = TimeSeriesBuffer(maxlen=120_000, ncols=3)   # combineForce raw (화면용)
         self._sinks: List[Sink] = []
+        self._on_stop: Dict[Sink, Callable[[], None]] = {}
         self._sink_lock = threading.Lock()
         self._requests: "queue.Queue[Callable[[], Optional[Iterator[float]]]]" = queue.Queue()
         self._timers: list = []
@@ -76,6 +78,9 @@ class UsbSensor(threading.Thread):
         self.infos: Dict[int, str] = {}   # (f) slot → 버전 문자열
         self._stop_polling = False   # (c0 `isStopUsbGetData`)
         self._logging = True         # (o) 기록 중 여부. 해제 시작 시 False
+        # (v.value) 채널 → 슬롯 → 그 슬롯의 마지막 프레임. 기록 행·헤더를 이것으로 만든다 (`W0`, `y0`).
+        # USB는 채널 0만 쓴다. 해제(`s1`) 때 비운다. 리더 스레드에서만 바꾼다.
+        self.sensors: List[List[Optional[Frame]]] = []
 
         # 상태 표시용 (PXSR에 없음, 동작에는 영향 없음)
         self.status = "disconnected"   # disconnected | connected | error
@@ -85,14 +90,18 @@ class UsbSensor(threading.Thread):
         self.last_rx: Optional[float] = None
 
     # ── 외부 API (다른 스레드에서 호출) ────────────────────────────
-    def add_sink(self, fn: Sink) -> None:
+    def add_sink(self, fn: Sink, on_stop: Optional[Callable[[], None]] = None) -> None:
+        """on_stop: 연결 해제 시작(PXSR `s1`의 `G1`)이나 오류로 기록이 멈출 때 리더 스레드에서 불린다."""
         with self._sink_lock:
             self._sinks.append(fn)
+            if on_stop is not None:
+                self._on_stop[fn] = on_stop
 
     def remove_sink(self, fn: Sink) -> None:
         with self._sink_lock:
             if fn in self._sinks:
                 self._sinks.remove(fn)
+            self._on_stop.pop(fn, None)
 
     def calibrate(self) -> None:
         self._requests.put(self._calibrate)
@@ -122,6 +131,7 @@ class UsbSensor(threading.Thread):
             log.exception("USB 리더 오류")
             self.status, self.error = "error", str(e)
             self._event("error", message=self.error)
+            self._stop_logging()
             self._shutdown()
             return
         self.status = "disconnected"
@@ -247,6 +257,13 @@ class UsbSensor(threading.Thread):
         t = self.clock.wall()   # `U2().format("HH:mm:ss.SSS")` 시점
         f = Frame(t=t, channel=0, slot=self.slot, sensor=self.sensor_type.label,
                   combine=tuple(parsed["combineForce"]), grid=tuple(parsed["multiGrid"]))
+        # `v.value[0]===void 0&&(v.value[0]=[]), v.value[0][h.value]=l1[0]`
+        if not self.sensors:
+            self.sensors.append([])
+        row = self.sensors[0]
+        if len(row) <= self.slot:
+            row.extend([None] * (self.slot + 1 - len(row)))
+        row[self.slot] = f
         self.frame_count += 1
         self.last_rx = t
         self.buffer.append(t, f.combine)
@@ -269,11 +286,21 @@ class UsbSensor(threading.Thread):
 
     def _close(self):
         """`s1` (452850). USB는 센서에 보내는 해제 명령이 없다."""
-        self._logging = False   # 기록 중이면 기록 중지 (G1)
+        self._stop_logging()    # `o.value&&G1()`: 기록 중이면 기록 중지
         yield 0.08
         self.slot = 0           # h.value = 0
         yield 0.8
         self._shutdown()
+
+    def _stop_logging(self) -> None:
+        self._logging = False
+        with self._sink_lock:
+            hooks = list(self._on_stop.values())
+        for fn in hooks:
+            try:
+                fn()
+            except Exception:
+                log.exception("on_stop 실패")
 
     def _shutdown(self) -> None:
         self._closed = True
@@ -284,4 +311,5 @@ class UsbSensor(threading.Thread):
         self._parser.reset()    # v0.value = Buffer.from([])
         self.version = ""
         self.infos.clear()
+        self.sensors = []       # v.value = []
         self._timers.clear()

@@ -73,13 +73,20 @@ def usb_source() -> str:
     return stubs + "".join("const " + p + ";" for p in parts)
 
 
-def run(harness: str, payload: Any, timeout: float = 120) -> Any:
-    """PXSR Node로 `usb_source() + harness`를 실행한다. harness는 전역 `INPUT`을 읽고 `OUTPUT`에 결과를 넣는다."""
+def csv_source() -> str:
+    """데이터 로깅 기준 코드: PXSR이 쓰는 `csv-writer`(설치본 node_modules 그대로)와 파일명 함수 `rs0`."""
+    src = BUNDLE.read_text(encoding="utf-8")
+    module = (PXSR_DIR / "resources/app/node_modules/csv-writer").as_posix()
+    return f"const csvWriter=require({json.dumps(module)});" + extract(r"function rs0\(t,e\)", src)
+
+
+def run(harness: str, payload: Any, timeout: float = 120, prelude: Optional[str] = None) -> Any:
+    """PXSR Node로 `prelude(기본 usb_source()) + harness`를 실행한다. harness는 전역 `INPUT`을 읽고 `OUTPUT`에 결과를 넣는다."""
     with tempfile.TemporaryDirectory() as d:
         inp, out, js = Path(d, "in.json"), Path(d, "out.json"), Path(d, "run.js")
         inp.write_text(json.dumps(payload), encoding="utf-8")
         js.write_text(
-            usb_source()
+            (usb_source() if prelude is None else prelude)
             + "const fs=require('fs');const INPUT=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));let OUTPUT=null;"
             + "(async()=>{" + harness + "\nfs.writeFileSync(process.argv[3],JSON.stringify(OUTPUT));})()"
             + ".catch(e=>{console.log(e&&e.stack||e);process.exit(1)});",

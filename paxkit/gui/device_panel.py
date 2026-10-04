@@ -19,6 +19,7 @@ SIM_PREFIX = "시뮬레이션: "
 
 class DevicePanel(QWidget):
     sensor_changed = Signal(object)   # UsbSensor 또는 None
+    sensor_event = Signal(str, dict)  # 리더 이벤트 (GUI 스레드에서)
     _event_sig = Signal(str, dict)    # 리더 스레드 → GUI 스레드
 
     def __init__(self, cfg: Config) -> None:
@@ -27,6 +28,7 @@ class DevicePanel(QWidget):
         self.sensor: Optional[UsbSensor] = None
         self._t_connect = 0.0
         self._is_sim = False
+        self._port = ""
 
         self.port_combo = QComboBox()
         refresh = QPushButton("새로고침")
@@ -97,6 +99,7 @@ class DevicePanel(QWidget):
         if not port:
             return
         self._is_sim = port.startswith(SIM_PREFIX)
+        self._port = port
         if self._is_sim:
             transport = SimUsbTransport(port[len(SIM_PREFIX):])
         else:
@@ -109,6 +112,10 @@ class DevicePanel(QWidget):
         self.connect_btn.setText("연결 해제")
         self.port_combo.setEnabled(False)
         self.sensor_changed.emit(self.sensor)
+
+    def connection_info(self) -> dict:
+        """기록 사이드카에 남길 연결 정보."""
+        return {"mode": "usb", "port": self._port, "simulated": self._is_sim}
 
     def disconnect_sensor(self) -> None:
         if self.sensor is not None and self.sensor.is_alive():
@@ -142,6 +149,7 @@ class DevicePanel(QWidget):
         self.events.scrollToBottom()
         if kind == "sensor_type" and not self._is_sim:
             save_state(specification=info["sensor"])   # PXSR `K`: specification 저장
+        self.sensor_event.emit(kind, info)
 
     def _refresh_status(self) -> None:
         s = self.sensor

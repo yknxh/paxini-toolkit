@@ -1,9 +1,10 @@
 """USB 직결 센서를 PXSR 없이 직접 읽어 본다 (PXSR은 꺼 두어야 포트를 열 수 있다).
 
-    python tools/usb_live_check.py [COM3] [--seconds 10] [--calibrate]
+    python tools/usb_live_check.py [COM3] [--seconds 10] [--calibrate] [--record]
 
 연결 → 지정 시간 동안 수신 → 해제. 버전·센서 타입·수신 속도·요청 간격·최근 값을 출력한다.
 --calibrate: 중간에 캘리브레이션 명령을 보낸다 (센서 영점이 바뀌므로 아무것도 누르지 않은 상태에서만).
+--record: 수신하는 동안 `data/logs/`에 PXSR 형식 CSV로 기록하고, 행 수 = 프레임 수인지 확인한다.
 """
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from paxkit.device.transport import SerialTransport, default_sensor_port, list_serial_ports  # noqa: E402
 from paxkit.device.usb import UsbSensor  # noqa: E402
+from paxkit.recording import CsvRecorder  # noqa: E402
 
 
 class LoggingTransport(SerialTransport):
@@ -36,6 +38,7 @@ def main() -> int:
     ap.add_argument("port", nargs="?")
     ap.add_argument("--seconds", type=float, default=10)
     ap.add_argument("--calibrate", action="store_true")
+    ap.add_argument("--record", action="store_true")
     a = ap.parse_args()
     port = a.port or default_sensor_port()
     if not port:
@@ -50,6 +53,10 @@ def main() -> int:
     s.add_sink(frames.append)
     t0 = time.perf_counter()
     s.start()
+    rec = None
+    if a.record:
+        rec = CsvRecorder(s, info={"mode": "usb", "port": port, "tool": "usb_live_check"})
+        rec.start()   # 첫 프레임 전에 시작해도 된다 (파일은 첫 행 뒤에 생긴다)
     if a.calibrate:
         time.sleep(a.seconds / 2)
         s.calibrate()
@@ -73,6 +80,10 @@ def main() -> int:
               f"1% {q[0] * 1e3:.2f}, 99% {q[98] * 1e3:.2f}, 최대 {max(gaps) * 1e3:.2f}")
         f = frames[-1]
         print(f"마지막 합력 raw {f.combine} → N {[v / 10 for v in f.combine]}")
+    if rec is not None:
+        n_rows = rec.path.read_bytes().count(b"\n") - 1 if rec.path.exists() else 0
+        print(f"기록 {rec.path} : 행 {n_rows}, 기록기 {rec.line_count}, 프레임 {len(frames)} "
+              f"({'일치' if n_rows == rec.line_count == len(frames) else '불일치'})")
     print("처음 보낸 명령:")
     for t, d in tr.tx[:11]:
         print(f"  {t - t0:7.3f}s {d.hex()}")
