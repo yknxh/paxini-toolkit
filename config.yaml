@@ -3,8 +3,8 @@
 # ── Paxini 센서 ───────────────────────────────────────────────────
 # baudrate는 PXSR 코드에 고정된 값(USB·HAND 921600)을 코드에서 쓰므로 여기서 바꾸지 않는다.
 device:
-  mode: ""                 # usb (센서 1개 직결) | hand (손 보드). TODO: 실기 검증(P1) 후 채움
-  port: ""                 # 예: COM5, /dev/ttyUSB0. TODO: 실기 검증(P1) 후 채움
+  mode: usb                # usb (센서 1개 직결) | hand (손 보드, 미구현)
+  port: ""                 # 비우면 CH343 포트를 자동 선택. 예: COM3, /dev/ttyUSB0
 
 sensor_types:
   A:

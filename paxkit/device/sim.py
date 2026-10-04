@@ -1,0 +1,100 @@
+"""시뮬레이션 센서: USB 직결 센서처럼 명령에 응답하는 가짜 포트.
+
+`UsbSensor`에 SerialTransport 대신 넣으면 장비 없이 같은 코드 경로로 GUI·기록을 돌려 볼 수 있다.
+응답 프레임 모양은 실기 캡처(2026-10-04, 펌웨어 v1.0.5)를 따른다. 값은 가짜 누름 프로파일.
+"""
+from __future__ import annotations
+
+import math
+from typing import List, Optional, Tuple
+
+from . import codec
+from .clock import RealClock
+
+SIM_VERSIONS = {
+    "S1813E": "PAXINI PXSR-STDDP03F-v1.0.5",
+    "S2015": "PAXINI PXSR-STDDP03G-v1.0.5",
+}
+
+
+def _response(sid: int, func: int, addr: int, n: int, body: bytes) -> bytes:
+    """`AA 55 | len | sid 00 | func | addr | n | 01 | body | cs` (캡처한 응답과 같은 배치)."""
+    f = [0xAA, 0x55, 0, 0, sid, 0, func, *addr.to_bytes(4, "little"), *n.to_bytes(2, "little"), 1, *body]
+    f[2:4] = list((len(f) + 1 - 5).to_bytes(2, "little"))
+    f.append(codec.checksum(f))
+    return bytes(f)
+
+
+class SimUsbTransport:
+    def __init__(self, sensor: str = "S1813E", service_id: int = 3, *, clock=None,
+                 response_delay: float = 0.0023, period: float = 4.0, peak_raw: int = 120) -> None:
+        self.version = SIM_VERSIONS[sensor]
+        self.taxels = codec.find_sensor_type(self.version).forces
+        self.service_id = service_id
+        self.clock = clock or RealClock()
+        self.response_delay = response_delay   # 실측 중앙값 2.3 ms
+        self.period = period
+        self.peak_raw = peak_raw
+        self.is_open = False
+        self.written: List[Tuple[float, bytes]] = []
+        self._pending: List[Tuple[float, bytes]] = []
+        self._t0: Optional[float] = None
+        self.zero = 0   # 캘리브레이션을 받으면 현재 값을 영점으로 삼는 흉내
+
+    def open(self) -> None:
+        self.is_open = True
+        self._t0 = self.clock.now()
+
+    def close(self) -> None:
+        self.is_open = False
+        self._pending.clear()
+
+    def write(self, data: bytes) -> None:
+        if not self.is_open:
+            raise OSError("port closed")
+        now = self.clock.now()
+        self.written.append((now, bytes(data)))
+        resp = self._respond(bytes(data))
+        if resp is not None:
+            self._pending.append((now + self.response_delay, resp))
+
+    def read_available(self) -> bytes:
+        now = self.clock.now()
+        out = b"".join(r for t, r in self._pending if t <= now)
+        self._pending = [(t, r) for t, r in self._pending if t > now]
+        return out
+
+    def _respond(self, d: bytes) -> Optional[bytes]:
+        if len(d) < 14 or d[:2] != b"\x55\xaa" or codec.checksum(d[:-1]) != d[-1] or d[4] != self.service_id:
+            return None
+        func, addr = d[6], int.from_bytes(d[7:11], "little")
+        n = int.from_bytes(d[11:13], "little")
+        if func == codec.USB_FUNC_READ and addr == codec.USB_ADDR_VERSION:
+            return _response(self.service_id, func, addr, n, self.version.encode().ljust(n, b"\0"))
+        if func == codec.USB_FUNC_READ and addr == codec.USB_ADDR_DATA:
+            return _response(self.service_id, func, addr, n, self._payload(n))
+        if func == codec.USB_FUNC_WRITE and addr == codec.USB_ADDR_CALIBRATION:
+            self.zero = self._press()
+            return self._cal_ack(d)
+        return None
+
+    def _cal_ack(self, d: bytes) -> bytes:
+        """캡처한 캘리브레이션 응답은 명령과 같은 모양 (`aa550a00…0100 00 cs`, 상태 0)."""
+        f = [0xAA, 0x55, *d[2:13], 0]
+        f.append(codec.checksum(f))
+        return bytes(f)
+
+    def _press(self) -> float:
+        t = self.clock.now() - (self._t0 or 0.0)
+        return max(0.0, math.sin(2 * math.pi * t / self.period)) * self.peak_raw
+
+    def _payload(self, n: int) -> bytes:
+        z = max(0.0, self._press() - self.zero)
+        p = bytearray(n)
+        p[0] = int(z * 0.05) & 0xFF               # X (int8)
+        p[1] = (-int(z * 0.03)) & 0xFF            # Y (int8)
+        p[2] = min(int(z), 255)                   # Z (uint8)
+        for i in range(min(self.taxels, (n - 30) // 3)):
+            w = math.exp(-((i - self.taxels / 2) ** 2) / (self.taxels / 3))
+            p[30 + 3 * i + 2] = min(int(z * w * 0.3), 255)
+        return bytes(p)
