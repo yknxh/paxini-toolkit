@@ -8,7 +8,11 @@ poll/stream 두 방식과 정규식 파싱으로 일반화했다.
 
 paxtest와 다른 점 (게이지는 PXSR 대체 대상이 아니므로 바이트 동일성 원칙과 무관):
 - 수신 시각을 센서 리더와 같은 시계(`clock.wall()`)로 찍는다. Windows `time.time()`은 15.6 ms 단위라
-  센서(정밀 시각)와 섞으면 시각이 어긋난다. 파싱·도착 시각 보정 규칙은 그대로.
+  센서(정밀 시각)와 섞으면 시각이 어긋난다.
+- 지연 보정 (2026-10-05 사용자 요청 "게이지 지연은 최대한 고쳐줘"). 실측 지연(센서−게이지) −50 ms를 둘로 나눠 뺀다:
+  1. stream 레코드 시각 = 레코드 **첫 바이트** 도착 시각 (paxtest는 마지막 바이트). 값은 송신 시작 전에 정해지므로
+     레코드 전송 시간(6바이트 × 10/2400 s = 25 ms)만큼 앞당긴다. baud·글자 수에서 계산되는 값.
+  2. 나머지 고정 지연 `latency_s` (config, 게이지 내부 측정→송신 + FTDI 버퍼 latency timer). 실측에서 1을 뺀 값.
 - 시리얼 포트를 여는 함수(`open_serial`)를 바꿀 수 있게 했다 (장비 없이 테스트).
 - SimGauge는 paxtest SimWorld 대신 하중 함수(`load`)를 받는다. 시뮬레이션 센서와 같은 하중을 주면 겹쳐 볼 수 있다.
 """
@@ -89,6 +93,7 @@ class SerialGauge(GaugeBase):
         # 구분자 없이 값이 이어 붙어 오는 stream (예: "0000.0-000.3-004.9...") 용
         self.record_regex = re.compile(cfg.get("record_regex", r"[-+ \d]\d{3}\.\d").encode())
         self.record_len = int(cfg.get("record_len", 6))
+        self.latency = float(cfg.get("latency_s", 0.0))   # 수신 시각에서 뺄 고정 지연 (s)
 
     @property
     def port(self) -> str:
@@ -135,6 +140,8 @@ class SerialGauge(GaugeBase):
         byte_s = 10.0 / baud   # 8N1 한 바이트 전송 시간
         timeout = float(cfg.get("timeout_s", 0.2))
         wall = self.clock.wall
+        rec_s = self.record_len * byte_s   # 레코드 한 개 전송 시간
+        lat = self.latency
         while not self._stop_evt.is_set():
             try:
                 with self.open_serial(self.port, baud, timeout) as ser:
@@ -151,8 +158,9 @@ class SerialGauge(GaugeBase):
                         total_len = len(buf)
                         records, buf = self._split_records(buf)
                         for end, value in records:
-                            # 한 번에 여러 레코드가 읽히면 뒤에 남은 바이트 수만큼 도착 시각을 앞당긴다
-                            self._emit(t1 - (total_len - end) * byte_s, value)
+                            # 한 번에 여러 레코드가 읽히면 뒤에 남은 바이트 수만큼 도착 시각을 앞당기고 (paxtest),
+                            # 레코드 전송 시간만큼 더 앞당겨 첫 바이트 시각으로 둔다. 고정 지연도 뺀다.
+                            self._emit(t1 - (total_len - end) * byte_s - rec_s - lat, value)
                     while not self._stop_evt.is_set():
                         t0 = wall()
                         if mode == "poll":
@@ -162,7 +170,7 @@ class SerialGauge(GaugeBase):
                         value = self._parse(raw)
                         if value is not None:
                             # poll 방식은 요청-응답 중간 시점을 샘플 시각으로 본다
-                            self._emit((t0 + t1) / 2 if mode == "poll" else t1, value)
+                            self._emit(((t0 + t1) / 2 if mode == "poll" else t1) - lat, value)
                         if mode == "poll":
                             rest = period - (wall() - t0)
                             if rest > 0:

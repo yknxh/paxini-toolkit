@@ -1,7 +1,9 @@
 """캘리브레이션 탭: PXSR 캘리브레이션 버튼(`O3`)과 같은 동작 + 결과·전후 값 표시 (계획 P7).
 
 PXSR 버튼은 연결 전에도 눌리지만, 연결 전에는 보낼 곳이 없고 다음 연결 때 `P1`이 폴링 중지 표시를 지우므로
-센서 쪽 결과는 같다. 여기서는 연결됐을 때만 누를 수 있게 한다. 중복 클릭은 PXSR처럼 막지 않는다.
+센서 쪽 결과는 같다. 여기서는 연결됐을 때만 누를 수 있게 한다 (2026-10-05 사용자 결정).
+중복 클릭은 막는다 (2026-10-05 사용자 결정, PXSR은 막지 않음): 1회가 끝날 때까지(응답 + 후 값 0.5 s, 또는 응답 없음 판정)
+버튼을 잠근다. 한 번 누를 때 센서로 가는 명령은 PXSR 1회 클릭과 같다.
 """
 from __future__ import annotations
 
@@ -77,11 +79,17 @@ class CalibrationPanel(QWidget):
         self.sensor_info = dict(info or {})
         self._update_button()
 
+    @property
+    def busy(self) -> bool:
+        """캘리브레이션 1회가 진행 중 (중복 클릭 잠금)."""
+        return bool(self.runs)
+
     def calibrate(self) -> None:
         s = self.sensor
-        if s is None or s.status != "connected" or not s.is_alive():
+        if s is None or s.status != "connected" or not s.is_alive() or self.busy:
             return
         self.runs.append(CalibrationRun(s, self.sensor_info).start())
+        self._update_button()
         self._show(self.runs[-1].result)
 
     def _poll(self) -> None:
@@ -97,7 +105,8 @@ class CalibrationPanel(QWidget):
 
     def _update_button(self) -> None:
         s = self.sensor
-        self.cal_btn.setEnabled(s is not None and s.status == "connected" and s.is_alive())
+        self.cal_btn.setEnabled(s is not None and s.status == "connected" and s.is_alive() and not self.busy)
+        self.cal_btn.setText("캘리브레이션 중…" if self.busy else "캘리브레이션")
 
     def _summary(self, r: CalibrationResult) -> str:
         t = datetime.fromtimestamp(r.requested).strftime("%H:%M:%S")

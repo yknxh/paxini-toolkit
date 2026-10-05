@@ -17,6 +17,8 @@ DEFAULTS: Dict[str, Any] = {
     "bin_N": 1.0,
     "zone_min_samples": 20,
     "lag_warn_s": 0.1,
+    "lag_correct": True,   # 세션마다 남은 게이지 지연을 상호상관으로 재서 짝짓기 전에 보정
+    "lag_min_r": 0.8,      # 상관이 이보다 낮으면 보정하지 않음 (추정을 믿기 어려움)
     "simultaneous_ratio": 0.5,
     "hand_order": ["A1", "A2", "B1", "B2"],
     "rated_N": 25.0,   # %FS 기준 (config `sensor_types.*.rated_N`, 두 타입 모두 25 N)

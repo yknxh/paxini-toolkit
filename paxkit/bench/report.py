@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from . import plots
+from .plots import lag_text
 from .zones import load_zones
 
 ROUND = {"t_unix_s": 6}
@@ -125,8 +126,7 @@ def _report_html(res, figs, imgs) -> str:
     r = res.result
     sens = "".join(
         f"<li>{html.escape(s['label'])}: {html.escape(str(s.get('model')))} (채널 {s['channel']}, 슬롯 {s['slot']}), "
-        f"프레임 {s['frames']}, {s['rate_hz']} Hz, 지연 "
-        + ("-" if s.get("lag_s") is None else f"{s['lag_s'] * 1e3:+.0f} ms (r {s['lag_r']:.2f})") + "</li>"
+        f"프레임 {s['frames']}, {s['rate_hz']} Hz, 남은 지연 {html.escape(lag_text(s))}</li>"
         for s in r["sensors"])
     warn = "".join(f"<li>{html.escape(w)}</li>" for w in r["warnings"]) or "<li>없음</li>"
     nl = r.get("noload_check") or {}

@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QListWidgetItem
 
 from ..bench import BenchResult, analyze_session, load_result
 from ..bench.analyze import read_meta
+from ..bench.plots import lag_text
 from ..bench.report import METRIC_LABELS, figures
 from ..paths import data_path
 from . import theme
@@ -179,8 +180,7 @@ class BenchResults(QWidget):
         r = res.result
         c = r["counts"]
         sens = "; ".join(
-            f"{s['label']} {s.get('model')} {s['rate_hz']} Hz, 지연 "
-            + ("-" if s.get("lag_s") is None else f"{s['lag_s'] * 1e3:+.0f} ms") for s in r["sensors"])
+            f"{s['label']} {s.get('model')} {s['rate_hz']} Hz, 남은 지연 {lag_text(s)}" for s in r["sensors"])
         warn = "".join(f"<li>{w}</li>" for w in r["warnings"])
         nl = r.get("noload_check") or {}
         m = res.metrics.iloc[0].to_dict() if len(res.metrics) else {}

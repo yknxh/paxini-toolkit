@@ -1,6 +1,7 @@
 """센서 점 그림 (pyqtgraph): 라이브 taxel 히트맵, 게이지 테스트 커버리지 지도.
 
 점 위치는 PXSR 3D 화면의 점 모델(`device/geometry`), 위에서 본 모습 (위 = 둥근 끝, 오른쪽 = +x).
+PXSR 처음 화면과 같은 방향이다: 카메라 (0, 0, h) → 원점, up = +y, 점 회전 없음 (`av0` 4551788).
 히트맵은 PXSR처럼 표면 점 = 이웃 taxel 값 × 가중치 합으로 칠한다. 색 범위는 화면 표시용이다.
 """
 from __future__ import annotations

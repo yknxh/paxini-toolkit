@@ -48,8 +48,8 @@ def test_surface_values_and_cop():
 def test_zones_cover_every_taxel_once(label):
     zs = load_zones(label)
     allt = sorted(i for z in zs.zones for i in z.taxels)
-    assert allt == list(range(zs.geometry.n_taxels)) and len(zs.zones) == 9
-    assert {(z.row, z.col) for z in zs.zones} == {(r, c) for r in range(3) for c in range(3)}
+    assert allt == list(range(zs.geometry.n_taxels)) and len(zs.zones) == 7
+    assert {(z.row, z.col) for z in zs.zones} == {(0, 1)} | {(r, c) for r in (1, 2) for c in range(3)}
     tz = np.zeros((1, zs.geometry.n_taxels))
     tz[0, list(zs.zones[4].taxels)] = 20
     assert zs.classify(tz, 5)[0] == 4 and zs.classify(tz * 0, 5)[0] == -1
@@ -75,7 +75,7 @@ def test_pairing_interpolates_and_drops_gaps():
 @pytest.fixture(scope="module")
 def usb_session(tmp_path_factory):
     d = tmp_path_factory.mktemp("bench") / "2026-10-05-100000_S1813E_A1"
-    make_session(d, [SynthSensor("A1", zone_bias={"tip-top": -0.5})], seconds=90, gauge_outliers=2)
+    make_session(d, [SynthSensor("A1", zone_bias={"tip": -0.5})], seconds=90, gauge_outliers=2)
     return d, analyze_session(d)
 
 
@@ -86,7 +86,7 @@ def test_synthetic_known_errors(usb_session):
         if row["slope"] is None or np.isnan(row["slope"]):
             continue
         assert row["slope"] == pytest.approx(1.05, abs=0.01), zid
-        want = -0.3 if zid == "tip-top" else 0.2
+        want = -0.3 if zid == "tip" else 0.2
         assert row["intercept"] == pytest.approx(want, abs=0.06), zid
     o = res.metrics.iloc[0]
     assert o["scope"] == "overall" and o["noload_mean_N"] == pytest.approx(0.1, abs=0.01)
@@ -94,6 +94,18 @@ def test_synthetic_known_errors(usb_session):
     assert s["model"] == "S1813E" and s["lag_s"] == pytest.approx(0.08, abs=0.011)
     assert any("이상값 2개" in w for w in res.warnings)
     assert sum(bool(m.loc[z, "enough"]) for z in m.index if m.loc[z, "scope"] == "zone") >= 5
+
+
+def test_lag_correction(usb_session):
+    """센서 지연 80 ms → 분석이 세션 지연을 재서 게이지 시각을 옮기고, 힘이 변하는 구간 오차가 줄어든다."""
+    d, res = usb_session
+    assert res.sensors[0]["lag_applied_s"] == pytest.approx(0.08, abs=0.011)
+    off = analyze_session(d, {"lag_correct": False}, write=False)
+    assert off.sensors[0]["lag_applied_s"] == 0 and off.sensors[0]["lag_s"] == res.sensors[0]["lag_s"]
+    on_c, off_c = res.metrics.iloc[0]["rmse_contact_N"], off.metrics.iloc[0]["rmse_contact_N"]
+    assert on_c < off_c * 0.8
+    low = analyze_session(d, {"lag_min_r": 1.01}, write=False)   # 상관이 기준보다 낮으면 보정 안 함
+    assert low.sensors[0]["lag_applied_s"] == 0
 
 
 def test_stable_filter_excludes_ramps(usb_session):

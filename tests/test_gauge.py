@@ -100,16 +100,20 @@ def test_noise_and_partial_record():
 
 
 def test_stream_arrival_time_correction():
-    """한 번에 읽힌 레코드는 뒤에 남은 바이트 수 × 10/baud 만큼 도착 시각을 앞당긴다 (paxtest와 같음)."""
-    g = SerialGauge(_cfg(), clock=StepClock([100.0]))
+    """한 번에 읽힌 레코드는 뒤에 남은 바이트 수 × 10/baud 만큼 도착 시각을 앞당기고 (paxtest와 같음),
+    레코드 전송 시간(6바이트)만큼 더 앞당겨 첫 바이트 시각으로 둔다. latency_s도 뺀다."""
+    g = SerialGauge(_cfg(latency_s=0.0), clock=StepClock([100.0]))
     out, _ = _run(g, [b"0000.0-000.3"])
     byte_s = 10.0 / 2400
-    assert [t for t, _ in out] == pytest.approx([100.0 - 6 * byte_s, 100.0])
+    assert [t for t, _ in out] == pytest.approx([100.0 - 12 * byte_s, 100.0 - 6 * byte_s])
     assert g.status == "disconnected"
+    g = SerialGauge(_cfg(latency_s=0.025), clock=StepClock([100.0]))
+    out, _ = _run(g, [b"0000.0"])
+    assert [t for t, _ in out] == pytest.approx([100.0 - 6 * byte_s - 0.025])
 
 
 def test_poll_mode_midpoint_time():
-    g = SerialGauge(_cfg(mode="poll", line_terminator="\r", invert=False, poll_hz=1000),
+    g = SerialGauge(_cfg(mode="poll", line_terminator="\r", invert=False, poll_hz=1000, latency_s=0.0),
                     clock=StepClock([10.0, 10.02, 10.03]))
     out, ser = _run(g, [b" 12.5\r"])
     assert out == [(pytest.approx(10.01), 12.5)] and ser.written[0] == b"D\r"

@@ -133,4 +133,4 @@ class LiveView(QWidget):
         if lag is None:
             self.lag.setText("지연: - (눌러야 추정)")
         else:
-            self.lag.setText(f"지연(센서−게이지): {lag * 1e3:+.0f} ms (r {r:.2f})")
+            self.lag.setText(f"남은 지연(센서−게이지): {lag * 1e3:+.0f} ms (r {r:.2f})")

@@ -11,8 +11,9 @@ from PySide6.QtWidgets import (QComboBox, QFormLayout, QGroupBox, QHBoxLayout, Q
 from ..config import Config
 from ..device.sim import SIM_VERSIONS, SimUsbTransport
 from ..device.transport import SerialTransport, list_serial_ports
-from ..device.usb import UsbSensor
+from ..device.usb import STALL_S, UsbSensor
 from ..state import load_state, save_state
+from . import theme
 
 SIM_PREFIX = "시뮬레이션: "
 
@@ -101,7 +102,8 @@ class DevicePanel(QWidget):
             transport = SerialTransport(port)
         self.events.clear()
         self.sensor = UsbSensor(transport, specification=load_state()["specification"],
-                                on_event=lambda k, info: self._event_sig.emit(k, info))
+                                on_event=lambda k, info: self._event_sig.emit(k, info),
+                                stall_s=float(self.cfg.get("device.stall_s") or STALL_S))
         self._t_connect = time.monotonic()
         self.sensor.start()
         self.connect_btn.setText("연결 해제")
@@ -136,6 +138,8 @@ class DevicePanel(QWidget):
             "warning": f"경고: {info.get('message')}",
             "error": f"오류: {info.get('message')}",
             "disconnected": "연결 해제됨",
+            "stalled": f"수신 멈춤 ({info.get('stall_s'):g} s 넘게 프레임 없음) — 기록 정지, 다시 연결 필요",
+            "resumed": "수신 다시 시작 (기록은 멈춘 상태)",
         }.get(kind, f"{kind} {info}")
         self.events.addItem(f"[{t:6.2f}s] {text}")
         self.events.scrollToBottom()
@@ -147,7 +151,10 @@ class DevicePanel(QWidget):
         s = self.sensor
         if s is None:
             return
-        self.lbl_status.setText({"connected": "연결됨", "error": f"오류: {s.error}"}.get(s.status, s.status))
+        if s.status == "connected" and s.stalled:
+            self.lbl_status.setText("<span style='color:%s'>수신 멈춤 — 연결 해제 후 다시 연결</span>" % theme.BAD)
+        else:
+            self.lbl_status.setText({"connected": "연결됨", "error": f"오류: {s.error}"}.get(s.status, s.status))
         self.lbl_type.setText(f"{s.sensor_type.label} (taxel {s.sensor_type.forces}), "
                               f"serviceID {s.service_id}, slot {s.slot}")
         self.lbl_version.setText(s.version or "-")

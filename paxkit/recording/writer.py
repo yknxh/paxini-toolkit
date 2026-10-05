@@ -91,7 +91,16 @@ class CsvRecorder:
         if attach:
             self.source.add_sink(self.on_frame, on_stop=self.stop)
             self._attached = True
+            if hasattr(self.source, "add_listener"):
+                self.source.add_listener(self._on_source_event)
         return self.path
+
+    def _on_source_event(self, kind: str, info: Dict[str, Any]) -> None:
+        """리더의 수신 멈춤을 사이드카 events에 남긴다 (리더가 이벤트 뒤에 기록을 멈춘다)."""
+        if kind == "stalled":
+            last = info.get("t")
+            self.note_event("stalled", None, last_frame=_iso(last) if last else None, stall_s=info.get("stall_s"),
+                            message="USB 수신 멈춤 → 마지막 프레임까지 저장하고 기록 정지")
 
     def on_frame(self, frame) -> None:
         """`d2(T1)` → `gs0.writeData` → `cs0.writeData`."""
@@ -120,6 +129,8 @@ class CsvRecorder:
             self.stopped_at = time.time()
         if self._attached:
             self.source.remove_sink(self.on_frame)
+            if hasattr(self.source, "remove_listener"):
+                self.source.remove_listener(self._on_source_event)
             self._attached = False
         self._stop_evt.set()
         if self._thread is not None and self._thread is not threading.current_thread():

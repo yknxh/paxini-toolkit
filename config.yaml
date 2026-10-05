@@ -5,6 +5,7 @@
 device:
   mode: usb                # usb (센서 1개 직결) | hand (손 보드, 미구현)
   port: ""                 # 비우면 CH343 포트를 자동 선택. 예: COM3, /dev/ttyUSB0
+  stall_s: 1.0             # 이보다 오래 프레임이 없으면 수신 멈춤 알림 + 기록 정지 (PXSR에 없음, 다시 요청하지는 않음)
 
 sensor_types:
   A:
@@ -32,6 +33,9 @@ gauge:
   unit_scale: 1.0          # 게이지 단위 → N (kgf면 9.80665). 게이지 표시 단위는 N 으로 설정해 둠
   invert: true             # 압축(누름)이 + 가 되도록. 실측: 누르면 '-' 로 온다
   timeout_s: 0.2
+  # 수신 시각에서 뺄 고정 지연 (s). 레코드 전송 시간(6바이트 = 25 ms)은 코드가 따로 뺀다.
+  # 0.025 = 실측 지연(센서−게이지) −50 ms (2026-10-05, 보정 전) − 전송 25 ms. 다시 재려면 tools/gauge_live_check.py --sensor
+  latency_s: 0.025
   accuracy_N: 0.1          # ± 정확도 (참고). 실측: 0.5 kg 분동 → 4.9 N (기준 4.90 N), 분해능 0.1 N 이내
 
 # ── 게이지 테스트 (bench, 계획 P6-4) — 값은 초안, 실기 데이터로 조정 ──
@@ -49,6 +53,8 @@ bench:
   min_taxel_sum: 5          # raw, 이보다 작으면 위치 없음
   bin_N: 1.0                # 오차 그래프 구간
   zone_min_samples: 20      # 구역 "충분" 판정 (안정 샘플 수)
-  lag_warn_s: 0.1           # |지연|이 이보다 크면 경고 (진단값, 보정하지 않음)
+  lag_warn_s: 0.1           # 남은 |지연|이 이보다 크면 경고 (게이지 latency_s를 다시 잴 때)
+  lag_correct: true         # 세션마다 남은 지연을 상호상관으로 재서 짝짓기 전에 보정 (2026-10-05 사용자 요청)
+  lag_min_r: 0.8            # 상관이 이보다 낮으면 보정하지 않음
   simultaneous_ratio: 0.5   # HAND 동시 접촉 판정
   hand_order: [A1, A2, B1, B2]   # HAND 누르는 순서. 라벨 ↔ 채널·슬롯은 P1b 후 추가

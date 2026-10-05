@@ -19,6 +19,7 @@ class RecordingPanel(QGroupBox):
         self.sensor = None
         self.sensor_info: dict = {}
         self.recorder: Optional[CsvRecorder] = None
+        self.stop_note = ""   # 기록이 저절로 멈춘 이유 (수신 멈춤 등)
 
         self.start_btn = QPushButton("기록 시작")
         self.start_btn.clicked.connect(self._toggle)
@@ -53,6 +54,15 @@ class RecordingPanel(QGroupBox):
         self.sensor_info = dict(info or {})
         self._refresh()
 
+    def on_stalled(self) -> Optional[Path]:
+        """센서 수신 멈춤으로 리더가 기록을 멈췄으면 그 파일 (행이 없어 파일이 없으면 None)."""
+        rec = self.recorder
+        if rec is None or rec.active or not any(e["kind"] == "stalled" for e in rec.events):
+            return None
+        self.stop_note = "수신 멈춤으로 정지 (멈춘 시점까지 저장)"
+        self._refresh()
+        return rec.path if rec.file_exists else None
+
     def note_calibration(self, result) -> None:
         """캘리브레이션 탭에서 1회가 끝나면 (CalibrationResult). 기록 중이면 사이드카 `events`에 남긴다."""
         rec = self.recorder
@@ -66,6 +76,7 @@ class RecordingPanel(QGroupBox):
         if self.recorder is not None and self.recorder.active:
             self.stop()
         elif self.sensor is not None:
+            self.stop_note = ""
             self.recorder = CsvRecorder(self.sensor, self.directory, info=self.sensor_info)
             self.recorder.start()
             self._refresh()
@@ -94,7 +105,8 @@ class RecordingPanel(QGroupBox):
         name = rec.path.name if rec.path else "-"
         if not rec.file_exists:
             name += " (첫 행 기록 전)" if recording else " (행 없음, 파일 안 만듦)"
-        self.lbl_file.setText(name + (f"\n쓰기 오류: {rec.error}" if rec.error else ""))
+        note = f"\n{self.stop_note}" if self.stop_note and not recording else ""
+        self.lbl_file.setText(name + note + (f"\n쓰기 오류: {rec.error}" if rec.error else ""))
         end = time.time() if recording else (rec.stopped_at or time.time())
         self.lbl_time.setText(f"{int(end - rec.started_at)} s")   # PXSR: 1초마다 +1
         self.lbl_rows.setText(str(rec.line_count))

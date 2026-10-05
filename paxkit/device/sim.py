@@ -43,6 +43,7 @@ class SimUsbTransport:
         self._pending: List[Tuple[float, bytes]] = []
         self._t0: Optional[float] = None
         self.zero = 0   # 캘리브레이션을 받으면 현재 값을 영점으로 삼는 흉내
+        self.mute = False   # True면 응답하지 않는다 (수신 멈춤 시험용)
         self.geometry = load_geometry(sensor)
 
     def open(self) -> None:
@@ -58,7 +59,7 @@ class SimUsbTransport:
             raise OSError("port closed")
         now = self.clock.now()
         self.written.append((now, bytes(data)))
-        resp = self._respond(bytes(data))
+        resp = None if self.mute else self._respond(bytes(data))
         if resp is not None:
             self._pending.append((now + self.response_delay, resp))
 

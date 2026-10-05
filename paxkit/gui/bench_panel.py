@@ -56,6 +56,7 @@ class BenchPanel(QWidget):
         self.coverage: Optional[Coverage] = None
         self.clock = RealClock()
         self.pending_events: List[Dict[str, Any]] = []   # 준비 단계 이벤트 (기록 시작 때 세션에 넣음)
+        self.calibration_busy = lambda: False   # 메인 창이 캘리브레이션 탭의 진행 중 여부로 바꾼다 (중복 클릭 잠금)
         self._noload_t0: Optional[float] = None
         self.analyzing = False
         self.root = None   # 테스트에서 저장 위치 바꾸기용 (None = data/bench)
@@ -200,6 +201,15 @@ class BenchPanel(QWidget):
             self.stop_recording(cancel=False, reason="게이지 연결이 끊겨 기록을 멈췄습니다")
         self._update_buttons()
 
+    def on_stalled(self, info: dict):
+        """센서 수신 멈춤: 기록 중이면 멈춘 시점까지 저장하고 정지 → 분석. 저장한 세션 폴더 (기록 중이 아니면 None)."""
+        if not self.recording:
+            return None
+        sess = self.session
+        self.note_event("sensor_stalled", info.get("t"), stall_s=info.get("stall_s"))
+        self.stop_recording(cancel=False, reason="센서 수신이 멈춰 기록을 멈췄습니다 (멈춘 시점까지 저장)")
+        return sess.folder
+
     @property
     def recording(self) -> bool:
         return self.session is not None and self.session.status == "recording"
@@ -311,7 +321,8 @@ class BenchPanel(QWidget):
         ready = self.ready()
         busy = self._noload_t0 is not None
         self.noload_btn.setEnabled(ready and not rec and not busy)
-        self.cal_btn.setEnabled(self.sensor is not None and _receiving(self.sensor) and not busy)
+        self.cal_btn.setEnabled(self.sensor is not None and _receiving(self.sensor) and not busy
+                                and not self.calibration_busy())
         self.start_btn.setEnabled(ready and not rec and not busy and bool(self.label_edit.text().strip()))
         self.stop_btn.setEnabled(rec)
         self.cancel_btn.setEnabled(rec)

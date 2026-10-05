@@ -43,6 +43,21 @@ _setup_fonts()
 ZONE_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#9a6324"]
 
 
+def zone_color(zs: ZoneSet, k: int) -> str:
+    """구역 색은 격자 위치(행·열)로 정한다 (구역 수가 바뀌어도 같은 자리는 같은 색)."""
+    z = zs.zones[k]
+    return ZONE_COLORS[(z.row * 3 + z.col) % len(ZONE_COLORS)]
+
+
+def lag_text(sensor: Dict) -> str:
+    """센서 정보의 지연 표시: 잰 값, 상관, 분석에서 보정했는지."""
+    lag = sensor.get("lag_s")
+    if lag is None:
+        return "- (누름 변화가 적어 못 잼)"
+    applied = sensor.get("lag_applied_s") or 0.0
+    return f"{lag * 1e3:+.0f} ms (r {sensor.get('lag_r'):.2f}, " + ("분석에서 보정)" if applied else "보정 안 함)")
+
+
 def _fig(w: float, h: float, theme: str) -> Figure:
     t = THEMES[theme]
     f = Figure(figsize=(w, h), facecolor=t["bg"], layout="constrained")
@@ -122,8 +137,7 @@ def _metrics_text(row: Dict, result: Dict, sensor: Optional[Dict]) -> str:
     if row.get("n_noload") is not None:
         lines.append(f"무부하 잔류 |F| 평균 {_fmt(row.get('noload_mean_N'), ' N')}, 최대 {_fmt(row.get('noload_max_N'), ' N')}")
     if sensor is not None:
-        lag = sensor.get("lag_s")
-        lines.append("지연(센서−게이지) " + ("-" if lag is None else f"{lag * 1e3:+.0f} ms (r {sensor.get('lag_r'):.2f}, 보정 안 함)"))
+        lines.append("남은 지연(센서−게이지) " + lag_text(sensor))
     return "\n".join(lines)
 
 
@@ -163,9 +177,9 @@ def draw_sensor(ax, zs: ZoneSet, theme: str, *, highlight: Optional[int] = None,
     elif highlight is not None:
         on = tz == highlight
         ax.scatter(g.taxels[~on, 0], g.taxels[~on, 1], s=taxel_size * 0.5, color=t["thin"], linewidths=0)
-        ax.scatter(g.taxels[on, 0], g.taxels[on, 1], s=taxel_size, color=ZONE_COLORS[highlight % 9], linewidths=0)
+        ax.scatter(g.taxels[on, 0], g.taxels[on, 1], s=taxel_size, color=zone_color(zs, highlight), linewidths=0)
     else:
-        cols = [ZONE_COLORS[k % 9] if k >= 0 else t["thin"] for k in tz]
+        cols = [zone_color(zs, k) if k >= 0 else t["thin"] for k in tz]
         ax.scatter(g.taxels[:, 0], g.taxels[:, 1], s=taxel_size, c=cols, linewidths=0)
     if cop is not None and len(cop):
         ax.scatter(cop[:, 0], cop[:, 1], s=3, color=t["fg"], alpha=0.35, linewidths=0, rasterized=True)
@@ -214,7 +228,7 @@ def zone_map_figure(zs: ZoneSet, samples: pd.DataFrame, zone_rows: pd.DataFrame,
 
 def zones_figure(zs: ZoneSet, samples: pd.DataFrame, zone_rows: pd.DataFrame, settings: Dict,
                  theme: str = "light", title: str = "구역별 오차") -> Figure:
-    """구역별 오차 그래프 격자 (세로 3 × 가로 3). 칸마다 [작은 센서 그림(구역 강조) | 오차 그래프], 축 범위 공통."""
+    """구역별 오차 그래프 격자 (구역의 행·열 자리, 빈 자리는 비움). 칸마다 [작은 센서 그림(구역 강조) | 오차 그래프], 축 범위 공통."""
     t = THEMES[theme]
     rows = max(z.row for z in zs.zones) + 1
     ncol = max(z.col for z in zs.zones) + 1
@@ -286,13 +300,13 @@ def crosstalk_figure(ct: pd.DataFrame, labels: List[str], theme: str = "light") 
 def zone_check_figure(zs: ZoneSet, theme: str = "light") -> Figure:
     """구역 정의 확인용: taxel 번호와 구역 색, 구역 이름."""
     t = THEMES[theme]
-    f = _fig(7, 8, theme)
+    f = _fig(7.6, 8, theme)
     ax = f.add_subplot(1, 1, 1)
     draw_sensor(ax, zs, theme, taxel_size=160)
     g = zs.geometry
     for i, p in enumerate(g.taxels):
         ax.text(p[0], p[1], str(i), ha="center", va="center", fontsize=7, color="#ffffff")
-    handles = [ax.scatter([], [], s=60, color=ZONE_COLORS[k % 9], label=f"{z.name} ({len(z.taxels)})")
+    handles = [ax.scatter([], [], s=60, color=zone_color(zs, k), label=f"{z.name} ({len(z.taxels)})")
                for k, z in enumerate(zs.zones)]
     ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.0, 1.0), fontsize=8, frameon=False,
               labelcolor=t["fg"])

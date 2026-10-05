@@ -6,6 +6,7 @@
 3. 헤더 테스트: PXSR CSV에 있는 모든 센서 배치(슬롯 2개, 채널 4개 등)를 `W0` 이식본이 똑같이 만든다.
 """
 import itertools
+import json
 import random
 import re
 import time
@@ -276,6 +277,40 @@ def test_disconnect_stops_recording(tmp_path):
     _drive(clock, s, 2.0)
     assert s._closed and s.sensors == []
     assert rec.line_count == n and len(_parse_csv(path)[1]) == n
+
+
+def test_stall_notifies_and_saves_until_stall(tmp_path):
+    """수신 멈춤 (2026-10-05 사용자 결정): 다시 요청하지 않고 (PXSR과 같음) 알림 이벤트 + 멈춘 시점까지 저장하고 기록 정지.
+    캘리브레이션 응답으로 폴링이 다시 시작되면 resumed (기록은 다시 시작하지 않음)."""
+    clock, s = _sim_sensor()
+    events = []
+    s.add_listener(lambda k, info: events.append((k, info)))
+    _drive(clock, s, 1.5)
+    rec = CsvRecorder(s, tmp_path)
+    path = rec.start()
+    _drive(clock, s, 0.5)
+    s.transport.mute = True
+    _drive(clock, s, 0.05)   # 이미 예약된 요청 하나는 나간다
+    n_sent = len(s.transport.written)
+    _drive(clock, s, 0.85)
+    assert rec.active and not s.stalled   # 1 s 전에는 멈춤으로 보지 않는다
+    _drive(clock, s, 0.2)
+    assert s.stalled and not rec.active
+    assert len(s.transport.written) == n_sent   # 재시도 명령 없음 (PXSR과 같음)
+    stalled = [i for k, i in events if k == "stalled"]
+    assert len(stalled) == 1 and stalled[0]["t"] == s.last_rx
+    _, rows = _parse_csv(path)
+    assert len(rows) == rec.line_count and rows[-1][0] == pxsr_csv.format_timestamp(s.last_rx)
+    side = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert [e["kind"] for e in side["events"]] == ["stalled"]
+    _drive(clock, s, 2.0)
+    assert len([k for k, _ in events if k == "stalled"]) == 1   # 한 번만
+    s.transport.mute = False
+    s.calibrate()
+    _drive(clock, s, 1.0)
+    assert not s.stalled and [k for k, _ in events][-1] in ("resumed", "calibration_ack") and \
+        "resumed" in [k for k, _ in events]
+    assert rec.line_count == len(rows)
 
 
 # ── 읽기 ─────────────────────────────────────────────────────────────

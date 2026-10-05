@@ -15,6 +15,9 @@ PXSR은 JS 이벤트 루프 하나에서 돌아간다 (`m2(t)` = `setTimeout(t*1
 
 PXSR 코드가 이상해 보여도 고치지 않는다 (CLAUDE.md 최우선 원칙). 예:
 - 응답이 오지 않거나 파싱이 실패하면 다음 요청을 보내지 않아 폴링이 멈춘다 (재시도 없음).
+  여기서도 다시 요청하지 않는다. 대신 PXSR에 없는 감시만 더했다 (2026-10-05 사용자 결정): 첫 프레임 뒤
+  `stall_s`초 넘게 프레임이 없으면 `stalled` 이벤트를 내고 기록(sink)을 멈춘다 → 기록 파일은 멈춘 시점까지.
+  센서로 가는 명령은 바뀌지 않는다. 프레임이 다시 오면 (예: 캘리브레이션 응답으로 폴링 재개) `resumed`.
 - 아무 센서도 버전에 응답하지 않으면 serviceID 1로, 마지막으로 쓴 센서 타입의 taxel 수로 폴링한다.
 """
 from __future__ import annotations
@@ -35,6 +38,7 @@ log = logging.getLogger(__name__)
 
 Sink = Callable[[Frame], None]
 TICK_S = 0.001   # 수신 확인 간격. 타이머는 이보다 짧게도 깨어난다
+STALL_S = 1.0    # 이보다 오래 프레임이 없으면 수신 멈춤 (PXSR에 없음). 캘리브레이션 중 폴링 중지는 약 0.5 s
 
 
 def initial_sensor_type(specification: str) -> codec.SensorType:
@@ -54,7 +58,8 @@ class UsbSensor(threading.Thread):
     """
 
     def __init__(self, transport, *, clock=None, specification: str = "S1813E",
-                 on_event: Optional[Callable[[str, dict], None]] = None) -> None:
+                 on_event: Optional[Callable[[str, dict], None]] = None,
+                 stall_s: Optional[float] = STALL_S) -> None:
         super().__init__(daemon=True, name="UsbSensor")
         self.transport = transport
         self.clock = clock or RealClock()
@@ -89,6 +94,10 @@ class UsbSensor(threading.Thread):
         self.frame_count = 0
         self.header_errors = 0        # parseUsbData status 1 (헤더 오류)
         self.last_rx: Optional[float] = None
+        # 수신 멈춤 감시 (PXSR에 없음, 센서로 가는 명령에는 영향 없음)
+        self.stall_s = stall_s
+        self.stalled = False
+        self._last_rx_mono: Optional[float] = None
 
     # ── 외부 API (다른 스레드에서 호출) ────────────────────────────
     def add_sink(self, fn: Sink, on_stop: Optional[Callable[[], None]] = None) -> None:
@@ -167,6 +176,7 @@ class UsbSensor(threading.Thread):
             self._resume(gen)
         if self._closed:
             return
+        self._check_stall()
         wait = TICK_S
         if self._timers:
             wait = min(wait, max(self._timers[0][0] - self.clock.now(), 0.0))
@@ -283,6 +293,10 @@ class UsbSensor(threading.Thread):
         row[self.slot] = f
         self.frame_count += 1
         self.last_rx = t
+        self._last_rx_mono = self.clock.now()
+        if self.stalled:
+            self.stalled = False
+            self._event("resumed", t=t)
         self.buffer.append(t, f.combine)
         if not self._logging:
             return
@@ -308,6 +322,23 @@ class UsbSensor(threading.Thread):
         self.slot = 0           # h.value = 0
         yield 0.8
         self._shutdown()
+
+    def _check_stall(self) -> None:
+        """첫 프레임 뒤 stall_s 넘게 프레임이 없으면 한 번 알리고 sink(기록)를 멈춘다. 해제 중이면 보지 않는다."""
+        if (self.stall_s is None or self.stalled or self._last_rx_mono is None or not self._logging
+                or self.clock.now() - self._last_rx_mono <= self.stall_s):
+            return
+        self.stalled = True
+        log.warning("USB 수신 멈춤: %.1f s 동안 프레임 없음", self.clock.now() - self._last_rx_mono)
+        # 이벤트 먼저 (기록기가 사이드카에 남기도록), 그다음 기록 정지
+        self._event("stalled", t=self.last_rx, stall_s=self.stall_s, frames=self.frame_count)
+        with self._sink_lock:
+            hooks = list(self._on_stop.values())
+        for fn in hooks:
+            try:
+                fn()
+            except Exception:
+                log.exception("on_stop 실패")
 
     def _stop_logging(self) -> None:
         self._logging = False

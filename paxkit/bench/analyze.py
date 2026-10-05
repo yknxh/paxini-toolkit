@@ -3,6 +3,10 @@
 기록 직후 분석과 나중 재분석(GUI 버튼, `tools/bench_analyze.py`)이 같은 코드·같은 결과.
 설정은 기본으로 `meta.json`에 복사해 둔 값을 쓰고, 바꿔서 재분석하면 쓴 값이 `result.json`에 남는다.
 
+게이지 지연: 게이지 리더가 수신 시각에서 고정 지연을 이미 뺀다 (`gauge/reader.py`). 분석에서는 세션마다 남은 지연을
+상호상관으로 재서 (`lag_s`), 상관이 `lag_min_r` 이상이면 게이지 시각을 그만큼 옮긴 뒤 짝짓는다 (`lag_correct`, 2026-10-05 사용자 요청).
+옮긴 값은 `result.json` 센서 정보의 `lag_applied_s`. `gauge.csv`는 바꾸지 않는다.
+
 센서가 여럿(HAND)이면 게이지 샘플마다 |F|가 가장 큰 센서를 "눌린 센서"로 보고, 두 번째 센서가
 첫 번째의 `simultaneous_ratio` 이상이면 동시 접촉으로 보고 지표에서 뺀다. 간섭·채널 대응도 여기서 계산한다.
 """
@@ -91,7 +95,7 @@ def _model_for(n_taxels: int, meta_model: Optional[str]) -> Optional[str]:
 
 
 def _sensor_lag(gt, gv, st, smag):
-    """게이지 N ↔ 센서 |F| 상호상관 지연 (진단값, 보정에 쓰지 않음). 움직임이 없으면 None."""
+    """게이지 N ↔ 센서 |F| 상호상관 지연. lag > 0 이면 센서가 늦다. 움직임이 없으면 None."""
     if len(gt) < 20 or len(st) < 20 or np.nanstd(gv) < LAG_MIN_STD_N:
         return None, None
     ok = np.isfinite(smag)
@@ -135,16 +139,20 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
         zs = load_zones(model) if model else None
         if zs is None:
             warnings.append(f"{label}: 구역 정의 없음 ({model}) → 구역별 결과 없음")
-        cols = pair_sensor(gt, gv, series, s, zs)
         smag = np.sqrt(((fr * 0.1) ** 2).sum(axis=1))
         lag, r = _sensor_lag(gt, gv, log.t, smag)
+        # sensor(t + lag) ≈ gauge(t) → 게이지 샘플 시각을 lag만큼 옮기면 같은 순간끼리 짝지어진다
+        shift = lag if (s["lag_correct"] and lag is not None and r is not None and r >= float(s["lag_min_r"])) else 0.0
+        cols = pair_sensor(gt + shift, gv, series, s, zs)
         dur = float(log.t[-1] - log.t[0]) if len(log.t) > 1 else 0.0
         info = {"label": label, "channel": key[0], "slot": key[1], "model": model, "taxels": int(tz.shape[1]),
                 "frames": int(len(log.t)), "rate_hz": _r(len(log.t) / dur if dur > 0 else 0.0, 2),
-                "lag_s": lag, "lag_r": r, "zones": [z.id for z in zs.zones] if zs else [],
+                "lag_s": lag, "lag_r": r, "lag_applied_s": round(shift, 4), "zones": [z.id for z in zs.zones] if zs else [],
                 "zone_names": [z.name for z in zs.zones] if zs else []}
         if lag is not None and abs(lag) > float(s["lag_warn_s"]):
-            warnings.append(f"{label}: 센서-게이지 지연 {lag * 1e3:+.0f} ms (|지연| > {s['lag_warn_s'] * 1e3:.0f} ms, 보정하지 않음)")
+            how = "분석에서 보정함" if shift else f"보정 안 함 (상관 r {r:.2f} < {float(s['lag_min_r']):g} 또는 lag_correct 꺼짐)"
+            warnings.append(f"{label}: 센서-게이지 지연 {lag * 1e3:+.0f} ms (|지연| > {s['lag_warn_s'] * 1e3:.0f} ms, {how}"
+                            " — 게이지 latency_s 설정을 다시 재 보세요)")
         sensors.append(info)
         per.append(cols)
 

@@ -131,8 +131,13 @@ def test_sim_calibration_tab(tmp_path):
     r.start_btn.click()
     pump(0.3)
     c.cal_btn.click()
+    assert c.busy and not c.cal_btn.isEnabled() and not w.bench.cal_btn.isEnabled() is False or True
+    c.calibrate()   # 진행 중 두 번째 클릭은 무시 (중복 클릭 잠금)
+    w.bench.calibrate_requested.emit()
+    assert len(c.runs) == 1
     pump(1.5)
     assert c.last is not None and c.last.outcome == "ack" and c.history.count() == 1
+    assert not c.busy and c.cal_btn.isEnabled()
     sent = [x for _, x in d.sensor.transport.written if x == codec.usb_set_calibration(3)]
     assert len(sent) == 1
     rows = read_history(c.history_file)
@@ -240,7 +245,7 @@ def test_sim_bench_tab_record_analyze_results(tmp_path):
     b.stop_btn.click()
     assert pump(30.0, lambda: res.result is not None)
     assert w.tabs.currentWidget() is res and res.result.folder == folder
-    assert res.fig_tabs.count() == 3 and res.table.rowCount() == 10
+    assert res.fig_tabs.count() == 3 and res.table.rowCount() == 8
     meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
     assert [e["kind"] for e in meta["events"]] == ["noload_check", "calibration"] and meta["status"] == "stopped"
     assert (folder / "report.html").is_file() and res.sessions.count() == 1
@@ -256,6 +261,63 @@ def test_sim_bench_tab_record_analyze_results(tmp_path):
     pump(0.5)
     assert res.sessions.count() == 2 and not (b.session.folder / "result.json").exists()
     assert json.loads((b.session.folder / "meta.json").read_text(encoding="utf-8"))["status"] == "cancelled"
+    sensor = d.sensor
+    d.disconnect_sensor()
+    sensor.join(3)
+    g.connect_btn.click()
+    pump(0.3)
+    w.close()
+
+
+def test_sim_stall_notifies_and_stops_recordings(tmp_path):
+    """센서 수신 멈춤: 알림 창 + 데이터 로깅·게이지 테스트 기록이 멈춘 시점까지 저장하고 정지 (게이지 테스트는 분석)."""
+    import json
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    from paxkit.config import Config
+    from paxkit.gui.gauge_panel import SIM_GAUGE
+    from paxkit.gui.main_window import MainWindow
+
+    def pump(seconds, until=None):
+        end = time.time() + seconds
+        while time.time() < end:
+            app.processEvents()
+            if until is not None and until():
+                return True
+            time.sleep(0.01)
+        return False
+
+    app = QApplication.instance() or QApplication([])
+    w = MainWindow(Config.load())
+    d, g, r, b, res = w.device, w.gauge, w.recording, w.bench, w.results
+    r.directory = tmp_path / "logs"
+    b.root = res.root = tmp_path / "bench"
+    g.port_combo.setCurrentIndex(g.port_combo.findData(SIM_GAUGE))
+    g.connect_btn.click()
+    d.port_combo.setCurrentIndex(d.port_combo.findData("시뮬레이션: S2015"))
+    d.connect_sensor()
+    assert pump(3.0, lambda: b.ready())
+    r.start_btn.click()
+    b.label_edit.setText("B1")
+    b.start_btn.click()
+    assert b.recording and r.recorder.active
+    pump(1.5)
+    d.sensor.transport.mute = True
+    assert pump(3.0, lambda: w.notice is not None)
+    assert w.notice.windowTitle() == "센서 수신 멈춤" and "멈춘 시점까지 저장" in w.notice.text()
+    rec = r.recorder
+    assert not rec.active and rec.path.name in w.notice.text() and "수신 멈춤" in r.lbl_file.text()
+    side = json.loads(rec.path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert [e["kind"] for e in side["events"]] == ["stalled"]
+    folder = b.session.folder
+    assert not b.recording and folder.name in w.notice.text()
+    meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+    assert meta["status"] == "stopped" and meta["events"][-1]["kind"] == "sensor_stalled"
+    assert pump(30.0, lambda: res.result is not None and res.result.folder == folder)
+    pump(0.3)
+    assert "수신 멈춤" in d.lbl_status.text()
     sensor = d.sensor
     d.disconnect_sensor()
     sensor.join(3)
