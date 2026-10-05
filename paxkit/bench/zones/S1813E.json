@@ -1,0 +1,109 @@
+{
+ "model": "S1813E",
+ "rule": "초안 (tools/make_zones.py): |x| < 3 mm 윗면, 아니면 x 부호로 옆면 / y < 4 mm 뿌리, < 11 mm 가운데, 나머지 끝",
+ "zones": [
+  {
+   "id": "tip-left",
+   "name": "끝 왼쪽 옆면",
+   "row": 0,
+   "col": 0,
+   "taxels": [
+    4,
+    9,
+    10
+   ]
+  },
+  {
+   "id": "tip-top",
+   "name": "끝 윗면",
+   "row": 0,
+   "col": 1,
+   "taxels": [
+    11,
+    16,
+    17,
+    18,
+    19
+   ]
+  },
+  {
+   "id": "tip-right",
+   "name": "끝 오른쪽 옆면",
+   "row": 0,
+   "col": 2,
+   "taxels": [
+    22,
+    23,
+    29
+   ]
+  },
+  {
+   "id": "mid-left",
+   "name": "가운데 왼쪽 옆면",
+   "row": 1,
+   "col": 0,
+   "taxels": [
+    2,
+    3,
+    6,
+    7
+   ]
+  },
+  {
+   "id": "mid-top",
+   "name": "가운데 윗면",
+   "row": 1,
+   "col": 1,
+   "taxels": [
+    14,
+    15
+   ]
+  },
+  {
+   "id": "mid-right",
+   "name": "가운데 오른쪽 옆면",
+   "row": 1,
+   "col": 2,
+   "taxels": [
+    24,
+    25,
+    28,
+    30
+   ]
+  },
+  {
+   "id": "root-left",
+   "name": "뿌리 왼쪽 옆면",
+   "row": 2,
+   "col": 0,
+   "taxels": [
+    0,
+    1,
+    5,
+    8
+   ]
+  },
+  {
+   "id": "root-top",
+   "name": "뿌리 윗면",
+   "row": 2,
+   "col": 1,
+   "taxels": [
+    12,
+    13
+   ]
+  },
+  {
+   "id": "root-right",
+   "name": "뿌리 오른쪽 옆면",
+   "row": 2,
+   "col": 2,
+   "taxels": [
+    20,
+    21,
+    26,
+    27
+   ]
+  }
+ ]
+}

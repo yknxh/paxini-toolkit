@@ -33,3 +33,22 @@ gauge:
   invert: true             # 압축(누름)이 + 가 되도록. 실측: 누르면 '-' 로 온다
   timeout_s: 0.2
   accuracy_N: 0.1          # ± 정확도 (참고). 실측: 0.5 kg 분동 → 4.9 N (기준 4.90 N), 분해능 0.1 N 이내
+
+# ── 게이지 테스트 (bench, 계획 P6-4) — 값은 초안, 실기 데이터로 조정 ──
+# 세션마다 meta.json에 복사되고, 재분석은 기본으로 그 값을 쓴다.
+bench:
+  max_N: 15                 # 안내 범위·힘 막대 경고선
+  contact_N: 0.5            # 접촉 판정 (게이지)
+  noload_N: 0.2             # 무부하 판정 (게이지)
+  noload_warn_N: 0.3        # 무부하 확인 경고
+  noload_check_s: 3.0       # 무부하 확인 시간
+  stable_window_s: 0.2      # 안정 판정: ± 이 시간 안의 기울기
+  stable_slope_N_per_s: 2.0
+  max_gap_s: 0.1            # 짝짓기 보간 허용 간격 (센서 앞뒤 프레임)
+  gauge_max_N: 100          # 게이지 이상값 제외
+  min_taxel_sum: 5          # raw, 이보다 작으면 위치 없음
+  bin_N: 1.0                # 오차 그래프 구간
+  zone_min_samples: 20      # 구역 "충분" 판정 (안정 샘플 수)
+  lag_warn_s: 0.1           # |지연|이 이보다 크면 경고 (진단값, 보정하지 않음)
+  simultaneous_ratio: 0.5   # HAND 동시 접촉 판정
+  hand_order: [A1, A2, B1, B2]   # HAND 누르는 순서. 라벨 ↔ 채널·슬롯은 P1b 후 추가

@@ -1,14 +1,18 @@
-"""메인 창: 왼쪽 장치 패널 + 가운데 탭. 각 단계가 끝날 때마다 탭을 추가한다 (계획 P7)."""
+"""메인 창: 왼쪽 장치 패널 + 가운데 탭 (라이브 / 캘리브레이션 / 테스트 / 결과). 어두운 테마 (계획 P7)."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QMainWindow, QSplitter, QTabWidget, QVBoxLayout, QWidget
 
 from .. import __version__
+from ..bench import bench_settings
 from ..config import Config
 from ..device.sim import SimUsbTransport
 from ..gauge import SimGauge
 from ..paths import DATA_DIR
+from . import theme
+from .bench_panel import BenchPanel
+from .bench_results import BenchResults
 from .calibration_panel import CalibrationPanel
 from .device_panel import DevicePanel
 from .gauge_panel import GaugePanel
@@ -18,6 +22,7 @@ from .recording_panel import RecordingPanel
 
 class MainWindow(QMainWindow):
     def __init__(self, cfg: Config) -> None:
+        theme.apply()   # pyqtgraph 색은 그래프 위젯을 만들기 전에 정해야 한다
         super().__init__()
         self.cfg = cfg
         self.setWindowTitle(f"paxkit {__version__}")
@@ -27,11 +32,18 @@ class MainWindow(QMainWindow):
         self.recording = RecordingPanel()
         self.calibration = CalibrationPanel()
         self.gauge = GaugePanel(cfg)
+        self.bench = BenchPanel(bench_settings(cfg), cfg.section("gauge"))
+        self.results = BenchResults()
         self.device.sensor_changed.connect(self.live.set_sensor)
         self.device.sensor_changed.connect(self._on_sensor)
         self.calibration.finished.connect(self.recording.note_calibration)
+        self.calibration.finished.connect(self.bench.note_calibration)
         self.gauge.gauge_changed.connect(self.live.set_gauge)
-        self.gauge.gauge_changed.connect(lambda _g: self._link_sim())
+        self.gauge.gauge_changed.connect(self._on_gauge)
+        self.bench.calibrate_requested.connect(self.calibration.calibrate)
+        self.bench.session_saved.connect(lambda _f: self.results.refresh())
+        self.bench.analyzed.connect(self._on_analyzed)
+        self.bench.analysis_failed.connect(self._on_analysis_failed)
         left = QWidget()
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(0, 0, 0, 0)
@@ -41,6 +53,8 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self.live, "라이브")
         self.tabs.addTab(self.calibration, "캘리브레이션")
+        self.tabs.addTab(self.bench, "테스트")
+        self.tabs.addTab(self.results, "결과")
         split = QSplitter(Qt.Horizontal)
         split.addWidget(left)
         split.addWidget(self.tabs)
@@ -53,7 +67,21 @@ class MainWindow(QMainWindow):
         info = self.device.connection_info() if s is not None else None
         self.recording.set_sensor(s, info)
         self.calibration.set_sensor(s, info)
+        self.bench.set_sensor(s, info)
         self._link_sim()
+
+    def _on_gauge(self, g) -> None:
+        self.bench.set_gauge(g, self.gauge.info() if g is not None else None)
+        self._link_sim()
+
+    def _on_analyzed(self, res) -> None:
+        self.bench.analysis_done(res)
+        self.results.show_result(res)
+        self.tabs.setCurrentWidget(self.results)   # 정지 후 결과 탭 자동으로 열기
+
+    def _on_analysis_failed(self, msg: str) -> None:
+        self.bench.lbl_rec.setText(f"분석 실패: {msg} (기록 파일은 남아 있음, 결과 탭에서 재분석)")
+        self.results.refresh()
 
     def _link_sim(self) -> None:
         """시뮬레이션 게이지 + 시뮬레이션 센서면 같은 하중을 읽게 한다 (겹쳐 보기·지연 확인용)."""
@@ -63,6 +91,7 @@ class MainWindow(QMainWindow):
             g.load = tr.load_N if isinstance(tr, SimUsbTransport) else None
 
     def closeEvent(self, ev) -> None:
+        self.bench.stop_recording(cancel=True, reason="창을 닫아 기록을 멈췄습니다")
         self.recording.stop()
         self.gauge.disconnect_gauge()
         self.device.shutdown()

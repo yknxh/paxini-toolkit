@@ -189,3 +189,76 @@ def test_sim_gauge_overlay():
     x, _ = w.live.gauge_curve.getData()
     assert x is None or len(x) == 0
     w.close()
+
+
+def test_sim_bench_tab_record_analyze_results(tmp_path):
+    """테스트 탭: 시뮬레이션 센서 + 게이지 → 무부하 확인 → 캘리브레이션 → 기록 → 정지 → 자동 분석 → 결과 탭."""
+    import json
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    from paxkit.config import Config
+    from paxkit.gui.gauge_panel import SIM_GAUGE
+    from paxkit.gui.main_window import MainWindow
+
+    def pump(seconds, until=None):
+        end = time.time() + seconds
+        while time.time() < end:
+            app.processEvents()
+            if until is not None and until():
+                return True
+            time.sleep(0.01)
+        return False
+
+    app = QApplication.instance() or QApplication([])
+    w = MainWindow(Config.load())
+    d, g, b, res = w.device, w.gauge, w.bench, w.results
+    b.root = res.root = tmp_path / "bench"
+    w.calibration.history_file = tmp_path / "history.jsonl"
+    b.settings["noload_check_s"] = 0.5
+    assert app.property("paxkit_theme") == "dark"
+    assert not b.start_btn.isEnabled()
+    g.port_combo.setCurrentIndex(g.port_combo.findData(SIM_GAUGE))
+    g.connect_btn.click()
+    d.port_combo.setCurrentIndex(d.port_combo.findData("시뮬레이션: S1813E"))
+    d.connect_sensor()
+    d.sensor.transport.period = 1.5   # 짧은 시간에 여러 위치를 누르게
+    assert pump(3.0, lambda: b.ready())
+    b.label_edit.setText("A1")
+    pump(0.3)
+    b.noload_btn.click()
+    assert pump(2.0, lambda: b.pending_events and b.pending_events[-1]["kind"] == "noload_check")
+    b.cal_btn.click()
+    assert pump(3.0, lambda: any(e["kind"] == "calibration" for e in b.pending_events))
+    assert b.start_btn.isEnabled()
+    b.start_btn.click()
+    assert b.recording and not b.label_edit.isEnabled()
+    pump(9.0)
+    assert b.coverage.total_stable > 0 and "기록 중" in b.lbl_rec.text()
+    folder = b.session.folder
+    b.stop_btn.click()
+    assert pump(30.0, lambda: res.result is not None)
+    assert w.tabs.currentWidget() is res and res.result.folder == folder
+    assert res.fig_tabs.count() == 3 and res.table.rowCount() == 10
+    meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+    assert [e["kind"] for e in meta["events"]] == ["noload_check", "calibration"] and meta["status"] == "stopped"
+    assert (folder / "report.html").is_file() and res.sessions.count() == 1
+    # 재분석 버튼 (같은 결과 파일을 덮어씀)
+    res.result = None
+    res.reanalyze_btn.click()
+    assert pump(30.0, lambda: res.result is not None)
+    # 취소: 기록 파일만 남고 분석하지 않음
+    time.sleep(1.1)
+    b.start_btn.click()
+    pump(1.0)
+    b.cancel_btn.click()
+    pump(0.5)
+    assert res.sessions.count() == 2 and not (b.session.folder / "result.json").exists()
+    assert json.loads((b.session.folder / "meta.json").read_text(encoding="utf-8"))["status"] == "cancelled"
+    sensor = d.sensor
+    d.disconnect_sensor()
+    sensor.join(3)
+    g.connect_btn.click()
+    pump(0.3)
+    w.close()

@@ -1,7 +1,9 @@
 """시뮬레이션 센서: USB 직결 센서처럼 명령에 응답하는 가짜 포트.
 
 `UsbSensor`에 SerialTransport 대신 넣으면 장비 없이 같은 코드 경로로 GUI·기록을 돌려 볼 수 있다.
-응답 프레임 모양은 실기 캡처(2026-10-04, 펌웨어 v1.0.5)를 따른다. 값은 가짜 누름 프로파일.
+응답 프레임 모양은 실기 캡처(2026-10-04, 펌웨어 v1.0.5)를 따른다. 값은 가짜 누름 프로파일:
+`period`마다 한 번 누르고(올림 20 %, 유지 35 %, 내림 20 %, 쉼 25 %), 누를 때마다 힘(최대값의 100·40·70 %)과
+위치(taxel 하나를 중심으로 한 분포, 센서 점 모델 좌표 기준)가 바뀐다. 게이지 테스트(bench)를 장비 없이 돌려 보기 위한 것.
 """
 from __future__ import annotations
 
@@ -10,6 +12,7 @@ from typing import List, Optional, Tuple
 
 from . import codec
 from .clock import RealClock
+from .geometry import load_geometry
 
 SIM_VERSIONS = {
     "S1813E": "PAXINI PXSR-STDDP03F-v1.0.5",
@@ -40,6 +43,7 @@ class SimUsbTransport:
         self._pending: List[Tuple[float, bytes]] = []
         self._t0: Optional[float] = None
         self.zero = 0   # 캘리브레이션을 받으면 현재 값을 영점으로 삼는 흉내
+        self.geometry = load_geometry(sensor)
 
     def open(self) -> None:
         self.is_open = True
@@ -84,9 +88,31 @@ class SimUsbTransport:
         f.append(codec.checksum(f))
         return bytes(f)
 
-    def _press(self) -> float:
+    LEVELS = (1.0, 0.4, 0.7)
+    SPREAD_MM = 2.5   # 누른 자리 둘레로 taxel 값이 퍼지는 정도
+
+    def _phase(self):
         t = self.clock.now() - (self._t0 or 0.0)
-        return max(0.0, math.sin(2 * math.pi * t / self.period)) * self.peak_raw
+        k, u = divmod(t / self.period, 1.0)
+        return int(k), u
+
+    def _press(self) -> float:
+        """지금 하중 (raw). 한 주기: 올림 0~0.2, 유지 ~0.55, 내림 ~0.75, 쉼."""
+        k, u = self._phase()
+        if u < 0.2:
+            a = u / 0.2
+        elif u < 0.55:
+            a = 1.0
+        elif u < 0.75:
+            a = (0.75 - u) / 0.2
+        else:
+            a = 0.0
+        return a * self.LEVELS[k % len(self.LEVELS)] * self.peak_raw
+
+    def _center(self) -> int:
+        """이번 누름의 중심 taxel (누를 때마다 센서 위를 고르게 옮겨 다닌다)."""
+        k, _ = self._phase()
+        return (k * 7) % self.taxels
 
     def load_N(self, _t_wall: float = 0.0) -> float:
         """지금 누르는 실제 하중 (N, 캘리브레이션 영점과 무관). 시뮬레이션 게이지(`SimGauge.load`)용."""
@@ -95,10 +121,20 @@ class SimUsbTransport:
     def _payload(self, n: int) -> bytes:
         z = max(0.0, self._press() - self.zero)
         p = bytearray(n)
-        p[0] = int(z * 0.05) & 0xFF               # X (int8)
-        p[1] = (-int(z * 0.03)) & 0xFF            # Y (int8)
-        p[2] = min(int(z), 255)                   # Z (uint8)
-        for i in range(min(self.taxels, (n - 30) // 3)):
-            w = math.exp(-((i - self.taxels / 2) ** 2) / (self.taxels / 3))
-            p[30 + 3 * i + 2] = min(int(z * w * 0.3), 255)
+        nt = min(self.taxels, (n - 30) // 3)
+        g = self.geometry
+        if g is not None:
+            c = self._center()
+            nx, ny, nz = g.normals[c]
+            d2 = ((g.taxels - g.taxels[c]) ** 2).sum(axis=1)
+            w = [math.exp(-v / (2 * self.SPREAD_MM ** 2)) for v in d2]
+        else:
+            nx, ny, nz = 0.05, -0.03, 1.0
+            w = [math.exp(-((i - self.taxels / 2) ** 2) / (self.taxels / 3)) for i in range(self.taxels)]
+        # 합력: 누른 면의 법선 방향 (크기 ≈ 하중)
+        p[0] = int(z * nx) & 0xFF                 # X (int8)
+        p[1] = int(z * ny) & 0xFF                 # Y (int8)
+        p[2] = min(int(z * nz), 255)              # Z (uint8)
+        for i in range(nt):
+            p[30 + 3 * i + 2] = min(int(z * w[i] * 0.3), 255)
         return bytes(p)

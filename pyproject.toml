@@ -27,5 +27,9 @@ paxkit = "paxkit.gui.app:main"
 [tool.setuptools.packages.find]
 include = ["paxkit*"]
 
+[tool.setuptools.package-data]
+# 센서 점 모델(PXSR에서 추출)·게이지 테스트 구역 정의
+paxkit = ["device/geometry/*.json", "bench/zones/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
