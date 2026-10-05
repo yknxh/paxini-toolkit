@@ -1,11 +1,11 @@
-"""게이지 시각 기준 짝짓기·샘플 분류 (계획 P6-2 2~5). 기록 중 커버리지와 사후 분석이 같은 함수를 쓴다.
+"""Pairing on gauge timestamps and sample classification (plan P6-2 2~5). Coverage during recording and post-analysis share these functions.
 
-- 기준은 게이지 샘플 (약 10 Hz, 느린 쪽). 센서 합력은 앞뒤 프레임 선형 보간 (앞뒤 간격 > max_gap_s면 버림),
-  taxel은 가장 가까운 프레임 값.
-- 지연 보정은 하지 않는다 (센서·게이지가 같은 PC 시계).
-- 비교량: 센서 합력 크기 |F| = √(X² + Y² + Z²) [N] (raw × 0.1) 대 게이지 [N]. 오차 = |F| − 게이지.
-- 접촉: 게이지 ≥ contact_N. 안정: 접촉이고 ± stable_window_s 안에서 게이지·센서 |F|의 기울기(최소제곱)가
-  모두 ≤ stable_slope_N_per_s. 무부하: 게이지 < noload_N 이고 같은 기울기 조건 (뗀 채 가만히 있는 구간).
+- The reference is the gauge sample (~10 Hz, the slower side). Sensor resultant force is linearly interpolated between the
+  surrounding frames (dropped if their gap > max_gap_s); taxels take the nearest frame.
+- No lag correction here (sensor and gauge share the same PC clock).
+- Compared quantity: sensor resultant magnitude |F| = √(X² + Y² + Z²) [N] (raw × 0.1) vs gauge [N]. Error = |F| − gauge.
+- Contact: gauge ≥ contact_N. Stable: in contact, and the least-squares slopes of gauge and sensor |F| within ± stable_window_s
+  are both ≤ stable_slope_N_per_s. No-load: gauge < noload_N with the same slope condition (released and held still).
 """
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ RAW_TO_N = 0.1
 
 @dataclass
 class SensorSeries:
-    """센서 하나의 프레임 열 (사후: CSV에서, 기록 중: sink에서)."""
-    t: np.ndarray           # (n,) Unix 초
-    force_raw: np.ndarray   # (n, 3) 합력 raw X, Y, Z
+    """Frame series of one sensor (post-analysis: from the CSV, during recording: from the sink)."""
+    t: np.ndarray           # (n,) Unix seconds
+    force_raw: np.ndarray   # (n, 3) resultant raw X, Y, Z
     taxel_z: np.ndarray     # (n, N) taxel Z raw
 
     def __post_init__(self) -> None:
@@ -33,7 +33,7 @@ class SensorSeries:
 
 
 def window_slopes(t: np.ndarray, v: np.ndarray, at: np.ndarray, half: float, min_n: int) -> np.ndarray:
-    """at 마다 [at − half, at + half] 안의 (t, v) 최소제곱 기울기. 점이 min_n개 미만이면 NaN."""
+    """Least-squares slope of (t, v) within [at − half, at + half] for each at. NaN if fewer than min_n points."""
     ok = np.isfinite(v)
     t, v = t[ok], v[ok]
     out = np.full(len(at), np.nan)
@@ -56,7 +56,7 @@ def window_slopes(t: np.ndarray, v: np.ndarray, at: np.ndarray, half: float, min
 
 
 def interp_force(gt: np.ndarray, s: SensorSeries, max_gap: float):
-    """게이지 시각마다 센서 합력 N (n, 3) 보간 + 가장 가까운 프레임 번호. 짝이 없으면 NaN / -1."""
+    """Sensor resultant N (n, 3) interpolated at each gauge time + nearest frame index. NaN / -1 if unpaired."""
     n = len(gt)
     F = np.full((n, 3), np.nan)
     near = np.full(n, -1)
@@ -83,9 +83,9 @@ def interp_force(gt: np.ndarray, s: SensorSeries, max_gap: float):
 
 def pair_sensor(gt: np.ndarray, gv: np.ndarray, s: SensorSeries, settings: Dict,
                 zones: Optional[ZoneSet] = None) -> Dict[str, np.ndarray]:
-    """게이지 샘플마다 센서 값을 짝짓고 분류한다. 반환은 열 이름 → 배열 (게이지 샘플 수 길이).
+    """Pairs sensor values with each gauge sample and classifies them. Returns column name → array (length = number of gauge samples).
 
-    `paired`가 False인 행(센서 짝 없음)은 F 값이 NaN이고 contact/stable/noload 모두 False.
+    Rows with `paired` False (no sensor pair) have NaN F values and contact/stable/noload all False.
     """
     gt = np.asarray(gt, dtype=float)
     gv = np.asarray(gv, dtype=float)
@@ -99,7 +99,7 @@ def pair_sensor(gt: np.ndarray, gv: np.ndarray, s: SensorSeries, settings: Dict,
     lim = float(settings["stable_slope_N_per_s"])
     contact = paired & (gv >= float(settings["contact_N"]))
     stable = contact & (np.abs(slope_g) <= lim) & (np.abs(slope_s) <= lim)
-    # 무부하: 손을 뗀 채 가만히 있는 구간만 (누르기 직전·뗀 직후의 변화 구간은 센서 잔류가 아니라 시각 차이)
+    # no-load: only segments with the hand off and still (transitions right before pressing / after release are timing offsets, not sensor residual)
     noload = paired & (gv < float(settings["noload_N"])) & (np.abs(slope_g) <= lim) & (np.abs(slope_s) <= lim)
 
     n = len(gt)
@@ -110,7 +110,7 @@ def pair_sensor(gt: np.ndarray, gv: np.ndarray, s: SensorSeries, settings: Dict,
         tz = s.taxel_z[near[has]]
         zone[has] = zones.classify(tz, float(settings["min_taxel_sum"]))
         cop[has] = zones.geometry.cop(tz)
-        cop[zone == NO_ZONE] = np.nan   # 위치 없음 (taxel Z 합이 작음)
+        cop[zone == NO_ZONE] = np.nan   # no position (taxel Z sum too small)
     return {
         "t_unix_s": gt, "gauge_N": gv,
         "Fx_N": F[:, 0], "Fy_N": F[:, 1], "Fz_N": F[:, 2], "F_N": mag,

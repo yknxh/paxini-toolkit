@@ -1,7 +1,7 @@
-"""어두운 테마 (Qt Fusion 스타일 + 어두운 팔레트, pyqtgraph 배경·글자색).
+"""Dark theme (Qt Fusion style + dark palette, pyqtgraph background/foreground colors).
 
-pyqtgraph 설정은 그래프 위젯을 만들기 전에 해야 하므로 메인 창을 만들 때 가장 먼저 부른다.
-matplotlib 결과 그림은 `bench.plots`의 "dark" 테마로 그린다 (같은 색 값).
+pyqtgraph options must be set before any plot widget is created, so this is called first when building the main window.
+matplotlib result figures use the "dark" theme of `bench.plots` (same color values).
 """
 from __future__ import annotations
 
@@ -9,9 +9,9 @@ import pyqtgraph as pg
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication
 
-BG = "#1e1f22"        # 그래프·입력칸 배경
-WINDOW = "#2b2d30"    # 창 배경
-PANEL = "#323438"     # 버튼
+BG = "#1e1f22"        # plot/input background
+WINDOW = "#2b2d30"    # window background
+PANEL = "#323438"     # buttons
 FG = "#dcdcdc"
 MUTED = "#8a8a8a"
 ACCENT = "#3d7bd9"
@@ -38,7 +38,7 @@ QToolTip {{ background: {PANEL}; color: {FG}; border: 1px solid #45474c; }}
 
 
 def apply(app: QApplication | None = None) -> None:
-    """어두운 테마 적용. 여러 번 불러도 된다."""
+    """Apply the dark theme. Safe to call more than once."""
     pg.setConfigOptions(background=BG, foreground=FG, antialias=True)
     app = app or QApplication.instance()
     if app is None or app.property("paxkit_theme") == "dark":

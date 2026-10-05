@@ -1,14 +1,15 @@
-"""Force gauge를 직접 읽어 본다. 센서도 함께 읽으면 같은 시계 기준 지연을 추정한다 (계획 P5 완료 기준).
+"""Reads the force gauge directly. When the sensor is read too, estimates the lag on the same clock (plan P5 completion criterion).
 
     python tools/gauge_live_check.py [COM7] [--seconds 10] [--sensor [COM3]] [--sim]
 
-게이지만: 수신 속도·값 범위·최근 값과 수신 간격을 출력한다.
---sensor: USB 센서도 연결해 같은 시간 동안 읽고, 게이지 N ↔ 센서 합력 크기(raw/10)의 상호상관으로 지연을 추정한다.
-          누르기·떼기를 몇 번 해야 추정된다 (가만히 두면 "추정 불가"). 센서 포트를 비우면 CH343 포트를 자동 선택.
---sim: 장비 없이 시뮬레이션 게이지(·센서)로 같은 흐름을 돌려 본다.
+Gauge only: prints receive rate, value range, latest value and receive intervals.
+--sensor: also connects a USB sensor, reads it for the same time, and estimates the lag by cross-correlating gauge N ↔ sensor
+          resultant magnitude (raw/10). Needs a few press/release cycles (idle → "cannot estimate"). With no sensor port,
+          the CH343 port is auto-selected.
+--sim: runs the same flow with a simulated gauge (and sensor), without hardware.
 
-실장비는 받은 바이트를 그대로 `data/gauge_raw/YYYY-MM-DD-HHMMSS.txt`에 남기고(시각 + 바이트),
-0.5 s 넘는 수신 공백과 범위 밖 값(|값| > --max-n)이 있으면 그 주변 바이트를 출력한다 (원인 확인용).
+With real hardware, received bytes are saved as-is to `data/gauge_raw/YYYY-MM-DD-HHMMSS.txt` (time + bytes), and for
+receive gaps over 0.5 s and out-of-range values (|value| > --max-n) the surrounding bytes are printed (for diagnosis).
 """
 from __future__ import annotations
 
@@ -34,11 +35,11 @@ GAP_S = 0.5
 
 
 class RawLog:
-    """시리얼 객체를 감싸 read로 받은 바이트를 시각과 함께 남긴다."""
+    """Wraps a serial object and records the bytes returned by read with their timestamps."""
 
     def __init__(self, clock):
         self.clock = clock
-        self.chunks = []   # (PC 시각, bytes)
+        self.chunks = []   # (PC time, bytes)
 
     def open(self, port, baud, timeout):
         ser = _open_serial(port, baud, timeout)
@@ -77,7 +78,7 @@ def main() -> int:
     ap.add_argument("--seconds", type=float, default=10)
     ap.add_argument("--sensor", nargs="?", const="", default=None)
     ap.add_argument("--sim", action="store_true")
-    ap.add_argument("--max-n", type=float, default=600.0, help="이보다 큰 |값|은 범위 밖으로 표시 (ZP-500N)")
+    ap.add_argument("--max-n", type=float, default=600.0, help="flag |values| above this as out of range (ZP-500N)")
     a = ap.parse_args()
     cfg = Config.load()
 
@@ -88,7 +89,7 @@ def main() -> int:
         else:
             port = a.sensor or default_sensor_port()
             if not port:
-                print("센서 포트를 찾지 못함. 포트 목록:")
+                print("Sensor port not found. Ports:")
                 for p in list_serial_ports():
                     print(f"  {p.device}  {p.description}  {'(CH343)' if p.is_sensor else ''}")
                 return 1
@@ -107,51 +108,51 @@ def main() -> int:
     gauge.start()
     if sensor is not None:
         sensor.start()
-    print(f"게이지 {gauge.port}{', 센서 함께' if sensor else ''}: {a.seconds:.0f}초 동안 읽는 중"
-          + (" (누르기·떼기를 몇 번 해 주세요)" if sensor else ""))
+    print(f"Gauge {gauge.port}{', with sensor' if sensor else ''}: reading for {a.seconds:.0f} s"
+          + (" (press and release a few times)" if sensor else ""))
     time.sleep(a.seconds)
     now = gauge.clock.wall()
     lag = sensor_lag(gauge.buffer, sensor.buffer, now, window=a.seconds) if sensor else None
-    status = f"{gauge.status} {gauge.error}".strip()   # 멈추면 disconnected가 되므로 먼저 읽는다
+    status = f"{gauge.status} {gauge.error}".strip()   # read first, since it becomes disconnected once stopped
     gauge.stop()
     gauge.join(3)
     if sensor is not None:
         sensor.disconnect()
         sensor.join(5)
 
-    print(f"게이지 상태 {status}")
+    print(f"Gauge status {status}")
     if raw is not None:
         path = data_path("gauge_raw") / (time.strftime("%Y-%m-%d-%H%M%S") + ".txt")
         raw.save(path)
-        print(f"받은 바이트 {sum(len(b) for _, b in raw.chunks)}개 → {path}")
+        print(f"Received {sum(len(b) for _, b in raw.chunks)} bytes → {path}")
     if len(samples) < 2:
-        print("게이지 값 없음 (포트·전원·출력 설정·케이블 확인)")
+        print("No gauge values (check port, power, output settings, cable)")
         return 1
     t = np.array([s[0] for s in samples])
     v = np.array([s[1] for s in samples])
     gaps = np.diff(t)
-    print(f"게이지 {len(samples)}개, {len(samples) / (t[-1] - t[0]):.1f} Hz, "
-          f"값 {v.min():.1f} ~ {v.max():.1f} N, 최근 {v[-1]:.1f} N")
-    print(f"수신 간격 ms: 중앙값 {statistics.median(gaps) * 1e3:.1f}, 최소 {gaps.min() * 1e3:.1f}, "
-          f"최대 {gaps.max() * 1e3:.1f}")
+    print(f"Gauge {len(samples)} samples, {len(samples) / (t[-1] - t[0]):.1f} Hz, "
+          f"values {v.min():.1f} ~ {v.max():.1f} N, latest {v[-1]:.1f} N")
+    print(f"Receive interval ms: median {statistics.median(gaps) * 1e3:.1f}, min {gaps.min() * 1e3:.1f}, "
+          f"max {gaps.max() * 1e3:.1f}")
     t_first = t[0]
     for i in np.flatnonzero(gaps > GAP_S):
-        print(f"  수신 공백 {t[i] - t_first:.2f}s → {t[i + 1] - t_first:.2f}s ({gaps[i]:.2f}s), "
-              f"전후 값 {v[i]:.1f} → {v[i + 1]:.1f}")
+        print(f"  Receive gap {t[i] - t_first:.2f}s → {t[i + 1] - t_first:.2f}s ({gaps[i]:.2f}s), "
+              f"values before/after {v[i]:.1f} → {v[i + 1]:.1f}")
         if raw is not None:
-            print(f"    전후 바이트 {raw.around(t[i] - 0.3, t[i + 1] + 0.3)!r}")
+            print(f"    bytes around {raw.around(t[i] - 0.3, t[i + 1] + 0.3)!r}")
     for i in np.flatnonzero(np.abs(v) > a.max_n):
-        print(f"  범위 밖 값 {t[i] - t_first:.2f}s: {v[i]:.1f} N")
+        print(f"  Out-of-range value at {t[i] - t_first:.2f}s: {v[i]:.1f} N")
         if raw is not None:
-            print(f"    주변 바이트 {raw.around(t[i] - 0.5, t[i] + 0.3)!r}")
+            print(f"    surrounding bytes {raw.around(t[i] - 0.5, t[i] + 0.3)!r}")
     if sensor is not None:
-        print(f"센서 {sensor.sensor_type.label}, 프레임 {sensor.frame_count}, 상태 {sensor.status} {sensor.error}")
+        print(f"Sensor {sensor.sensor_type.label}, frames {sensor.frame_count}, status {sensor.status} {sensor.error}")
         off, r = lag
         if off is None:
-            print("지연: 추정 불가 (게이지 값 변화가 0.3 N 미만이거나 데이터 부족)")
+            print("Lag: cannot estimate (gauge variation below 0.3 N or not enough data)")
         else:
-            print(f"지연(센서 - 게이지): {off * 1e3:+.0f} ms, 상관 {r:.3f}"
-                  "  (+ 이면 센서가 늦음. 게이지 약 10 Hz라 ±50 ms 정도는 구분이 어려움)")
+            print(f"Lag (sensor - gauge): {off * 1e3:+.0f} ms, correlation {r:.3f}"
+                  "  (+ means the sensor is late. The gauge is ~10 Hz, so about ±50 ms is hard to resolve)")
     return 0
 
 

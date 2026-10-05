@@ -1,8 +1,8 @@
-"""게이지 ↔ 센서 지연 추정 (paxtest `analysis/loader._xcorr_offset`에서 이전).
+"""Gauge ↔ sensor lag estimation (ported from paxtest `analysis/loader._xcorr_offset`).
 
-센서와 게이지는 같은 PC 시계로 수신 시각을 찍는다 (계획 2장 "하나의 시계"). 남는 것은 게이지 쪽 고정 지연뿐이고,
-리더가 `latency_s`로 뺀다. 라이브 화면은 남은 지연을 표시만 하고, 게이지 테스트 분석은 세션마다 이 값으로 보정한다
-(`bench/analyze.py`, 2026-10-05 사용자 요청). 기록 파일 값은 바꾸지 않는다.
+Sensor and gauge receive times are stamped with the same PC clock (plan ch. 2 "one clock"). Only a fixed gauge-side latency
+remains, which the reader subtracts via `latency_s`. The live view only displays the remaining lag; the gauge test analysis
+corrects it per session (`bench/analyze.py`, 2026-10-05 user request). Recorded file values are not changed.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import numpy as np
 
 def xcorr_offset(tg, fg, tp, fp, t_lo: float, t_hi: float, max_off: float,
                  dt: float = 0.005) -> Tuple[Optional[float], float]:
-    """sensor(t + lag) ≈ gauge(t)가 되는 lag(초)와 상관계수. lag > 0 이면 센서가 게이지보다 늦다."""
+    """lag (s) such that sensor(t + lag) ≈ gauge(t), and the correlation coefficient. lag > 0 means the sensor lags the gauge."""
     grid = np.arange(t_lo, t_hi, dt)
     if len(grid) < 50:
         return None, 0.0
@@ -38,9 +38,9 @@ def xcorr_offset(tg, fg, tp, fp, t_lo: float, t_hi: float, max_off: float,
 
 def sensor_lag(gauge_buffer, sensor_buffer, now: float, *, window: float = 10.0, max_off: float = 0.5,
                min_std_N: float = 0.3) -> Tuple[Optional[float], float]:
-    """최근 window 초의 게이지 N과 센서 합력 크기(raw/10 N)로 센서 지연을 추정한다.
+    """Estimates sensor lag from gauge N and sensor resultant magnitude (raw/10 N) over the last window seconds.
 
-    게이지 변화가 min_std_N보다 작으면(누르지 않음) 추정하지 않는다 → (None, 0).
+    No estimate if the gauge variation is below min_std_N (not pressed) → (None, 0).
     """
     tg, vg = gauge_buffer.snapshot(since=now - window)
     tp, vp = sensor_buffer.snapshot(since=now - window)

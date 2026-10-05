@@ -1,14 +1,16 @@
-"""세션 폴더 분석 (계획 P6-2): 기록 파일(센서 CSV + `gauge.csv` + `meta.json`)만 읽어 결과를 만든다.
+"""Session folder analysis (plan P6-2): builds results from the recorded files only (sensor CSV + `gauge.csv` + `meta.json`).
 
-기록 직후 분석과 나중 재분석(GUI 버튼, `tools/bench_analyze.py`)이 같은 코드·같은 결과.
-설정은 기본으로 `meta.json`에 복사해 둔 값을 쓰고, 바꿔서 재분석하면 쓴 값이 `result.json`에 남는다.
+Analysis right after recording and later re-analysis (GUI button, `tools/bench_analyze.py`) share the same code and results.
+Settings default to the values copied into `meta.json`; when re-analyzed with changed values, the values used are kept in `result.json`.
 
-게이지 지연: 게이지 리더가 수신 시각에서 고정 지연을 이미 뺀다 (`gauge/reader.py`). 분석에서는 세션마다 남은 지연을
-상호상관으로 재서 (`lag_s`), 상관이 `lag_min_r` 이상이면 게이지 시각을 그만큼 옮긴 뒤 짝짓는다 (`lag_correct`, 2026-10-05 사용자 요청).
-옮긴 값은 `result.json` 센서 정보의 `lag_applied_s`. `gauge.csv`는 바꾸지 않는다.
+Gauge lag: the gauge reader already subtracts a fixed latency from receive times (`gauge/reader.py`). The analysis measures the
+remaining lag per session by cross-correlation (`lag_s`) and, if the correlation is >= `lag_min_r`, shifts the gauge times by that
+amount before pairing (`lag_correct`, 2026-10-05 user request). The applied shift is `lag_applied_s` in the sensor info of
+`result.json`. `gauge.csv` is not modified.
 
-센서가 여럿(HAND)이면 게이지 샘플마다 |F|가 가장 큰 센서를 "눌린 센서"로 보고, 두 번째 센서가
-첫 번째의 `simultaneous_ratio` 이상이면 동시 접촉으로 보고 지표에서 뺀다. 간섭·채널 대응도 여기서 계산한다.
+With multiple sensors (HAND), the sensor with the largest |F| at each gauge sample is taken as the "pressed sensor"; if the
+second sensor is >= `simultaneous_ratio` of the first, it counts as simultaneous contact and is excluded from the metrics.
+Interference and channel mapping are also computed here.
 """
 from __future__ import annotations
 
@@ -95,7 +97,7 @@ def _model_for(n_taxels: int, meta_model: Optional[str]) -> Optional[str]:
 
 
 def _sensor_lag(gt, gv, st, smag):
-    """게이지 N ↔ 센서 |F| 상호상관 지연. lag > 0 이면 센서가 늦다. 움직임이 없으면 None."""
+    """Gauge N ↔ sensor |F| cross-correlation lag. lag > 0 means the sensor is late. None if there is no movement."""
     if len(gt) < 20 or len(st) < 20 or np.nanstd(gv) < LAG_MIN_STD_N:
         return None, None
     ok = np.isfinite(smag)
@@ -117,14 +119,14 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
     gt, gv = read_gauge(folder)
     bad = ~np.isfinite(gv) | (np.abs(gv) > float(s["gauge_max_N"]))
     if bad.any():
-        warnings.append(f"게이지 이상값 {int(bad.sum())}개 제외 (|값| > {s['gauge_max_N']:g} N)")
+        warnings.append(f"Excluded {int(bad.sum())} gauge outliers (|value| > {s['gauge_max_N']:g} N)")
     gt, gv = gt[~bad], gv[~bad]
     order = np.argsort(gt, kind="stable")
     gt, gv = gt[order], gv[order]
 
     csv = find_sensor_csv(folder, meta)
     if csv is None:
-        raise FileNotFoundError(f"센서 기록 CSV가 없음: {folder}")
+        raise FileNotFoundError(f"Sensor CSV not found: {folder}")
     log = read_log(csv)
     meta_sensors = {(m.get("channel"), m.get("slot")): m for m in meta.get("sensors", [])}
     sensors: List[Dict[str, Any]] = []
@@ -138,10 +140,10 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
         series = SensorSeries(log.t, fr, tz)
         zs = load_zones(model) if model else None
         if zs is None:
-            warnings.append(f"{label}: 구역 정의 없음 ({model}) → 구역별 결과 없음")
+            warnings.append(f"{label}: no zone definition ({model}) → no per-zone results")
         smag = np.sqrt(((fr * 0.1) ** 2).sum(axis=1))
         lag, r = _sensor_lag(gt, gv, log.t, smag)
-        # sensor(t + lag) ≈ gauge(t) → 게이지 샘플 시각을 lag만큼 옮기면 같은 순간끼리 짝지어진다
+        # sensor(t + lag) ≈ gauge(t) → shifting gauge sample times by lag pairs up the same instants
         shift = lag if (s["lag_correct"] and lag is not None and r is not None and r >= float(s["lag_min_r"])) else 0.0
         cols = pair_sensor(gt + shift, gv, series, s, zs)
         dur = float(log.t[-1] - log.t[0]) if len(log.t) > 1 else 0.0
@@ -150,16 +152,16 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
                 "lag_s": lag, "lag_r": r, "lag_applied_s": round(shift, 4), "zones": [z.id for z in zs.zones] if zs else [],
                 "zone_names": [z.name for z in zs.zones] if zs else []}
         if lag is not None and abs(lag) > float(s["lag_warn_s"]):
-            how = "분석에서 보정함" if shift else f"보정 안 함 (상관 r {r:.2f} < {float(s['lag_min_r']):g} 또는 lag_correct 꺼짐)"
-            warnings.append(f"{label}: 센서-게이지 지연 {lag * 1e3:+.0f} ms (|지연| > {s['lag_warn_s'] * 1e3:.0f} ms, {how}"
-                            " — 게이지 latency_s 설정을 다시 재 보세요)")
+            how = "corrected in analysis" if shift else f"not corrected (correlation r {r:.2f} < {float(s['lag_min_r']):g} or lag_correct off)"
+            warnings.append(f"{label}: sensor-gauge lag {lag * 1e3:+.0f} ms (|lag| > {s['lag_warn_s'] * 1e3:.0f} ms, {how}"
+                            " — re-measure the gauge latency_s setting)")
         sensors.append(info)
         per.append(cols)
 
     n = len(gt)
     if not per:
-        raise ValueError("센서 열이 없음")
-    # 눌린 센서 (HAND) — 센서 1개면 항상 그 센서
+        raise ValueError("No sensor columns")
+    # pressed sensor (HAND) — with one sensor, always that sensor
     mags = np.vstack([np.where(np.isfinite(c["F_N"]), c["F_N"], -np.inf) for c in per])
     pressed = mags.argmax(axis=0)
     simultaneous = np.zeros(n, dtype=bool)
@@ -168,7 +170,7 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
         first, second = srt[-1], srt[-2]
         simultaneous = (first > 0) & (second >= float(s["simultaneous_ratio"]) * first) & (gv >= float(s["contact_N"]))
         if simultaneous.any():
-            warnings.append(f"동시 접촉 {int(simultaneous.sum())}개 제외 (두 번째 센서 ≥ 첫 번째의 {s['simultaneous_ratio']:g}배)")
+            warnings.append(f"Excluded {int(simultaneous.sum())} simultaneous contacts (second sensor ≥ {s['simultaneous_ratio']:g}× the first)")
     idx = np.arange(n)
     cols: Dict[str, np.ndarray] = {}
     for k in per[0]:
@@ -182,16 +184,16 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
     zone_col = np.array([zone_ids[p][z] if z != NO_ZONE else "" for p, z in zip(pressed, cols["zone"])], dtype=object)
     sensor_col = labels[pressed] if n else np.array([], dtype=object)
 
-    # 지표
+    # metrics
     rows: List[Dict[str, Any]] = []
     all_mask = np.ones(n, dtype=bool)
     noload = cols["noload"]
     rows.append({"scope": "overall", "sensor": "" if len(per) > 1 else sensors[0]["label"], "id": "all",
-                 "name": "전체", **group_metrics(cols, all_mask, s, noload)})
+                 "name": "Overall", **group_metrics(cols, all_mask, s, noload)})
     for i, info in enumerate(sensors):
         sm = sensor_col == info["label"]
         if len(per) > 1:
-            # 무부하 잔류는 센서마다 그 센서의 |F| (눌린 센서와 무관)
+            # no-load residual is each sensor's own |F| (independent of the pressed sensor)
             own = dict(cols, F_N=per[i]["F_N"])
             nl = group_metrics(own, np.zeros(n, dtype=bool), s, noload)
             m = group_metrics(cols, sm, s, None)
@@ -203,7 +205,7 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
                          **group_metrics(cols, zm, s, None)})
         nz = sm & cols["stable"] & (cols["zone"] == NO_ZONE)
         if nz.any():
-            warnings.append(f"{info['label']}: 위치 없음(taxel Z 합 < {s['min_taxel_sum']:g}) 안정 샘플 {int(nz.sum())}개 — 전체에만 포함")
+            warnings.append(f"{info['label']}: {int(nz.sum())} stable samples without position (taxel Z sum < {s['min_taxel_sum']:g}) — included in overall only")
     metrics = pd.DataFrame(rows, columns=["scope", "sensor", "id", "name"] + METRIC_COLUMNS)
 
     crosstalk = _crosstalk(per, pressed, cols, gv, labels) if len(per) > 1 else None
@@ -219,11 +221,11 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
     samples = samples[np.isfinite(cols["F_N"])].reset_index(drop=True)
     unpaired = int(n - len(samples))
     if unpaired:
-        warnings.append(f"센서 짝이 없는 게이지 샘플 {unpaired}개 제외 (센서 앞뒤 프레임 간격 > {s['max_gap_s']:g} s 또는 기록 범위 밖)")
+        warnings.append(f"Excluded {unpaired} gauge samples without a sensor pair (gap between sensor frames > {s['max_gap_s']:g} s or outside the recording)")
     st = metrics[metrics["scope"] == "zone"]
     thin = st[~st["enough"].astype(bool)]
     if len(thin):
-        warnings.append(f"데이터 부족 구역 {len(thin)}개 (안정 샘플 < {s['zone_min_samples']}): " + ", ".join(
+        warnings.append(f"{len(thin)} zones with insufficient data (stable samples < {s['zone_min_samples']}): " + ", ".join(
             (f"{a}/" if len(per) > 1 else "") + b for a, b in zip(thin["sensor"], thin["name"])))
 
     noload_events = [e for e in meta.get("events", []) if e.get("kind") == "noload_check"]
@@ -267,7 +269,7 @@ def _records(df: pd.DataFrame) -> List[Dict[str, Any]]:
 
 
 def _crosstalk(per, pressed, cols, gv, labels) -> pd.DataFrame:
-    """센서 i를 누르는 동안(접촉·동시 아님, 게이지 ≥ 1 N) 다른 센서 j의 |F|."""
+    """|F| of other sensors j while sensor i is pressed (contact, not simultaneous, gauge ≥ 1 N)."""
     rows = []
     base = cols["contact"] & (gv >= 1.0)
     for i, li in enumerate(labels):
@@ -287,7 +289,7 @@ def _crosstalk(per, pressed, cols, gv, labels) -> pd.DataFrame:
 
 
 def _channel_check(meta, sensor_col, cols, warnings) -> List[Dict[str, Any]]:
-    """"다음 센서" 이벤트로 나뉜 구간마다 실제로 가장 많이 눌린 센서가 안내한 센서와 같은지."""
+    """For each segment between "next sensor" events, whether the most-pressed sensor matches the prompted one."""
     ev = sorted((e for e in meta.get("events", []) if e.get("kind") == "sensor_switch"),
                 key=lambda e: e.get("t_unix_s", 0))
     out = []
@@ -301,12 +303,12 @@ def _channel_check(meta, sensor_col, cols, warnings) -> List[Dict[str, Any]]:
         ok = got == e.get("label")
         out.append({"guided": e.get("label"), "pressed": got, "samples": int(sel.sum()), "match": bool(ok)})
         if got is not None and not ok:
-            warnings.append(f"채널 대응: '{e.get('label')}' 차례에 '{got}'이(가) 눌림 (배선·설정 확인)")
+            warnings.append(f"Channel mapping: '{got}' pressed during the '{e.get('label')}' turn (check wiring/settings)")
     return out
 
 
 def load_result(folder: Union[str, Path]) -> Optional[BenchResult]:
-    """저장된 결과(`result.json`, `samples.csv`, `metrics.csv`)를 다시 읽는다 (재분석 없이 GUI 표시용)."""
+    """Reloads saved results (`result.json`, `samples.csv`, `metrics.csv`) for GUI display, without re-analysis."""
     folder = Path(folder)
     p = folder / "result.json"
     if not p.is_file() or not (folder / "samples.csv").is_file():

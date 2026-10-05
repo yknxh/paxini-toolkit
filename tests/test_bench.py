@@ -1,4 +1,4 @@
-"""게이지 테스트 (계획 P6-6 검증): 점 모델·구역, 합성 세션 분석, 재분석 결정성, 커버리지, 세션 기록."""
+"""Gauge test (plan P6-6 verification): point model/zones, synthetic session analysis, re-analysis determinism, coverage, session recording."""
 import json
 import time
 from pathlib import Path
@@ -21,15 +21,15 @@ from paxkit.recording.reader import read_log
 PAXTEST_GEOM = Path(__file__).resolve().parents[2] / "paxini-test-windows/paxtest/devices/geometry"
 
 
-# ── 점 모델·구역 ──
+# ── point model / zones ──
 @pytest.mark.parametrize("label,old,n,m", [("S1813E", "S1813E", 31, 660), ("S2015", "S2015E", 52, 1156)])
 def test_geometry_matches_paxtest(label, old, n, m):
     g = load_geometry(label)
     assert g.taxels.shape == (n, 3) and g.surface.shape == (m, 3) and g.neighbor.max() < n
-    assert load_geometry(old) is g   # config의 S2015E 이름도 같은 모델
+    assert load_geometry(old) is g   # the config name S2015E maps to the same model
     p = PAXTEST_GEOM / f"{old}.json"
     if not p.is_file():
-        pytest.skip("paxtest geometry 없음")
+        pytest.skip("paxtest geometry not found")
     ref = np.array(json.loads(p.read_text(encoding="utf-8"))["positions_mm"])
     assert np.abs(g.taxels - ref).max() < 1e-6
 
@@ -71,7 +71,7 @@ def test_pairing_interpolates_and_drops_gaps():
     assert not c["contact"][1] and c["error_N"][0] == pytest.approx(0.5)
 
 
-# ── 합성 세션 분석 ──
+# ── synthetic session analysis ──
 @pytest.fixture(scope="module")
 def usb_session(tmp_path_factory):
     d = tmp_path_factory.mktemp("bench") / "2026-10-05-100000_S1813E_A1"
@@ -92,19 +92,19 @@ def test_synthetic_known_errors(usb_session):
     assert o["scope"] == "overall" and o["noload_mean_N"] == pytest.approx(0.1, abs=0.01)
     s = res.sensors[0]
     assert s["model"] == "S1813E" and s["lag_s"] == pytest.approx(0.08, abs=0.011)
-    assert any("이상값 2개" in w for w in res.warnings)
+    assert any("2 gauge outliers" in w for w in res.warnings)
     assert sum(bool(m.loc[z, "enough"]) for z in m.index if m.loc[z, "scope"] == "zone") >= 5
 
 
 def test_lag_correction(usb_session):
-    """센서 지연 80 ms → 분석이 세션 지연을 재서 게이지 시각을 옮기고, 힘이 변하는 구간 오차가 줄어든다."""
+    """Sensor lag 80 ms → the analysis measures the session lag, shifts gauge times, and the error during force changes shrinks."""
     d, res = usb_session
     assert res.sensors[0]["lag_applied_s"] == pytest.approx(0.08, abs=0.011)
     off = analyze_session(d, {"lag_correct": False}, write=False)
     assert off.sensors[0]["lag_applied_s"] == 0 and off.sensors[0]["lag_s"] == res.sensors[0]["lag_s"]
     on_c, off_c = res.metrics.iloc[0]["rmse_contact_N"], off.metrics.iloc[0]["rmse_contact_N"]
     assert on_c < off_c * 0.8
-    low = analyze_session(d, {"lag_min_r": 1.01}, write=False)   # 상관이 기준보다 낮으면 보정 안 함
+    low = analyze_session(d, {"lag_min_r": 1.01}, write=False)   # no correction when the correlation is below the threshold
     assert low.sensors[0]["lag_applied_s"] == 0
 
 
@@ -113,9 +113,9 @@ def test_stable_filter_excludes_ramps(usb_session):
     st = res.samples[res.samples["stable"] == 1]
     lv = np.array([4.0, 8.0, 12.0])
     assert len(st) > 200
-    assert np.min(np.abs(st["gauge_N"].to_numpy()[:, None] - lv), axis=1).max() < 0.05   # 유지 구간만
+    assert np.min(np.abs(st["gauge_N"].to_numpy()[:, None] - lv), axis=1).max() < 0.05   # hold segments only
     ct = res.samples[(res.samples["contact"] == 1) & (res.samples["stable"] == 0)]
-    assert len(ct) > 100   # 올림·내림 샘플은 접촉이지만 안정 아님
+    assert len(ct) > 100   # ramp up/down samples are contact but not stable
 
 
 def test_result_files_and_reanalysis_deterministic(usb_session, tmp_path):
@@ -152,28 +152,28 @@ def test_session_csv_is_pxsr_format(usb_session):
 def test_hand_crosstalk_simultaneous_and_channel_check(tmp_path):
     sensors = [SynthSensor("A1", "S1813E", channel=0), SynthSensor("A2", "S1813E", channel=1),
                SynthSensor("B1", "S2015", channel=2), SynthSensor("B2", "S2015", channel=3)]
-    actual = [0, 1, 3, 2]   # B1 차례에 B2를, B2 차례에 B1을 누름 (라벨 뒤바뀜)
-    seg = 10                # 누름 10번(30 s)마다 다음 센서
+    actual = [0, 1, 3, 2]   # B2 pressed on B1's turn, B1 on B2's turn (labels swapped)
+    seg = 10                # next sensor every 10 presses (30 s)
     events = [{"kind": "sensor_switch", "label": lab, "t_rel": i * seg * 3.0} for i, lab in enumerate(["A1", "A2", "B1", "B2"])]
     d = make_session(tmp_path / "hand", sensors, seconds=120, schedule=lambda k: actual[(k // seg) % 4],
                      crosstalk=0.05, simultaneous_every=7, events=events)
     res = analyze_session(d)
     assert [s["label"] for s in res.sensors] == ["A1", "A2", "B1", "B2"]
     ct = res.crosstalk
-    # 간섭 5 % (raw 0.1 N 단위로 반올림돼 약한 힘에서 비율이 조금 커진다)
+    # 5 % interference (rounding to raw 0.1 N units makes the ratio slightly larger at low force)
     assert len(ct) == 12 and ct["p95_ratio_pct"].between(3.5, 7.5).all()
     assert res.result["counts"]["simultaneous"] > 0
     assert res.samples.loc[res.samples["simultaneous"] == 1, "stable"].eq(0).all()
     cc = res.result["channel_check"]
     assert [c["match"] for c in cc] == [True, True, False, False]
-    assert any("채널 대응" in w for w in res.warnings)
+    assert any("Channel mapping" in w for w in res.warnings)
     srows = res.metrics[res.metrics["scope"] == "sensor"]
     assert list(srows["name"]) == ["A1", "A2", "B1", "B2"] and (srows["slope"] - 1.05).abs().max() < 0.02
     for name in ("crosstalk.csv", "plots/sensors_compare.png", "plots/crosstalk.png", "plots/B2/zones.png"):
         assert (d / name).is_file(), name
 
 
-# ── 커버리지 (기록 중) = 분석과 같은 규칙 ──
+# ── coverage (during recording) = same rules as the analysis ──
 def test_coverage_matches_analysis(tmp_path):
     d = make_session(tmp_path / "cov", [SynthSensor("A1")], seconds=40)
     res = analyze_session(d, write=False)
@@ -198,7 +198,7 @@ def test_coverage_matches_analysis(tmp_path):
     per_zone = res.samples[res.samples["stable"] == 1].groupby("zone").size()
     ids = [z.id for z in zs.zones]
     got = dict(zip(ids, cov.stable))
-    # 끝 부분(마지막 창)은 아직 처리 전일 수 있다
+    # the tail (last window) may not be processed yet
     assert sum(got.values()) >= res.result["counts"]["stable"] - 10
     for zid, n in per_zone.items():
         assert abs(got[zid] - n) <= 10
@@ -212,10 +212,10 @@ def test_noload_check_warns():
         gb.append(i * 0.1, 0.05)
     r = noload_check(sb, gb, 0.0, 3.0, 0.3)
     assert r["gauge_mean_N"] == pytest.approx(0.05) and r["sensor_F_mean_N"] == pytest.approx(0.5)
-    assert len(r["warnings"]) == 1 and "센서" in r["warnings"][0]
+    assert len(r["warnings"]) == 1 and "Sensor" in r["warnings"][0]
 
 
-# ── 세션 기록 (시뮬레이션 센서 + 게이지, 실제 시간) ──
+# ── session recording (simulated sensor + gauge, real time) ──
 def test_bench_session_with_sim(tmp_path):
     tr = SimUsbTransport("S1813E", period=1.0)
     s = UsbSensor(tr)

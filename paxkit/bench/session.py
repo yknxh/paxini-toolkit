@@ -1,9 +1,9 @@
-"""게이지 테스트 세션 기록 (계획 P6-1, 4.2): `data/bench/YYYY-MM-DD-HHMMSS_<model>_<label>/`.
+"""Gauge test session recording (plan P6-1, 4.2): `data/bench/YYYY-MM-DD-HHMMSS_<model>_<label>/`.
 
-- 센서: 일반 로깅과 같은 `CsvRecorder`(directory = 세션 폴더) → PXSR과 같은 CSV + 사이드카 `.json`.
-- 게이지: `gauge.csv` (`t_unix_s,force_N`, paxtest 형식). 시각은 센서와 같은 `clock.wall()`.
-- `meta.json`: 형식 버전, 연결·센서·게이지 정보, 테스트 설정 전부, 시작·정지 시각, 이벤트(무부하 확인, 캘리브레이션 등).
-분석은 이 파일들만 읽는다 (`analyze.py`). 센서 값에는 어떤 보정도 하지 않는다.
+- Sensor: the same `CsvRecorder` as regular logging (directory = session folder) → PXSR-identical CSV + `.json` sidecar.
+- Gauge: `gauge.csv` (`t_unix_s,force_N`, paxtest format). Timestamps use the same `clock.wall()` as the sensor.
+- `meta.json`: format version, connection/sensor/gauge info, all test settings, start/stop times, events (no-load check, calibration, etc.).
+The analysis reads only these files (`analyze.py`). No correction is applied to sensor values.
 """
 from __future__ import annotations
 
@@ -31,13 +31,13 @@ def _iso(t: Optional[float]) -> Optional[str]:
 
 
 def safe_label(label: str) -> str:
-    """폴더 이름에 쓸 수 있게: 공백·경로 문자 → `_`. 비면 `noname`."""
+    """Make it usable as a folder name: spaces/path characters → `_`. `noname` if empty."""
     s = re.sub(r'[\\/:*?"<>|\s]+', "_", label.strip()).strip("._")
     return s or "noname"
 
 
 def noload_check(sensor_buffer, gauge_buffer, t0: float, t1: float, warn_N: float) -> Dict[str, Any]:
-    """무부하 확인 (손 뗀 상태): [t0, t1] 동안 게이지·센서 평균. 기록만 하고 값 보정에 쓰지 않는다."""
+    """No-load check (hand off): gauge and sensor means over [t0, t1]. Recorded only, never used to correct values."""
     ts, vs = sensor_buffer.snapshot(since=t0)
     vs = vs[ts <= t1] * 0.1
     tg, vg = gauge_buffer.snapshot(since=t0)
@@ -53,19 +53,19 @@ def noload_check(sensor_buffer, gauge_buffer, t0: float, t1: float, warn_N: floa
         out["sensor_mean_N"] = out["sensor_F_mean_N"] = None
     warn = []
     if out["gauge_mean_N"] is None:
-        warn.append("게이지 값 없음")
+        warn.append("No gauge values")
     elif abs(out["gauge_mean_N"]) > warn_N:
-        warn.append(f"게이지 무부하 {out['gauge_mean_N']:+.2f} N (게이지 영점 버튼 확인)")
+        warn.append(f"Gauge no-load {out['gauge_mean_N']:+.2f} N (check the gauge zero button)")
     if out["sensor_F_mean_N"] is None:
-        warn.append("센서 값 없음")
+        warn.append("No sensor values")
     elif out["sensor_F_mean_N"] > warn_N:
-        warn.append(f"센서 무부하 |F| {out['sensor_F_mean_N']:.2f} N (캘리브레이션 권장)")
+        warn.append(f"Sensor no-load |F| {out['sensor_F_mean_N']:.2f} N (calibration recommended)")
     out["warnings"] = warn
     return out
 
 
 class BenchSession:
-    """세션 1개. 준비 단계(무부하 확인 등)의 이벤트는 `note_event`로 모았다가 `start()` 때 폴더와 함께 쓴다."""
+    """One session. Events from the preparation stage (no-load check, etc.) are collected with `note_event` and written with the folder on `start()`."""
 
     def __init__(self, sensor, gauge, settings: Dict[str, Any], *, label: str, model: str,
                  sensor_info: Optional[Dict[str, Any]] = None, gauge_info: Optional[Dict[str, Any]] = None,
@@ -90,17 +90,17 @@ class BenchSession:
         self._lock = threading.Lock()
         self._gauge_file = None
 
-    # ── 이벤트 ──
+    # ── events ──
     def note_event(self, kind: str, t: Optional[float] = None, **info: Any) -> None:
         t = time.time() if t is None else t
         with self._lock:
             self.events.append({"time": _iso(t), "t_unix_s": round(t, 6), "kind": kind, **info})
         if self.recorder is not None and kind == "calibration":
-            self.recorder.note_event(kind, t, **info)   # 센서 기록 사이드카에도 (일반 로깅과 같게)
+            self.recorder.note_event(kind, t, **info)   # also into the sensor recording sidecar (same as regular logging)
         if self.status == "recording":
             self._write_meta()
 
-    # ── 기록 ──
+    # ── recording ──
     def start(self, now: Optional[datetime] = None) -> Path:
         now = now or datetime.now()
         root = self.root or data_path("bench")
@@ -147,7 +147,7 @@ class BenchSession:
     def sensor_rows(self) -> int:
         return self.recorder.line_count if self.recorder is not None else 0
 
-    # ── 내부 ──
+    # ── internal ──
     def _sensor_list(self) -> List[Dict[str, Any]]:
         s = self.sensor
         st = getattr(s, "sensor_type", None)

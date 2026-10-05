@@ -1,14 +1,14 @@
-"""USBPcap 캡처(.pcapng / .pcap)에서 PC↔센서 시리얼 바이트를 뽑는다.
+"""Extract PC↔sensor serial bytes from a USBPcap capture (.pcapng / .pcap).
 
-Wireshark·tshark 없이 순수 Python으로 읽는다 (fixture 재생성·검증을 어느 OS에서도 할 수 있게).
+Reads with pure Python, no Wireshark/tshark (so fixtures can be regenerated and verified on any OS).
 
-출력(JSONL, 한 줄 = USB 전송 1개):
-  {"t": 수신 시각(unix 초, 문자열로 정밀도 보존), "dir": "tx"|"rx"|"ctrl", "hex": 데이터, ...}
-  - tx: PC → 센서 (bulk OUT, URB 제출 시점)
-  - rx: 센서 → PC (bulk IN, URB 완료 시점)
-  - ctrl: control 전송 (CH343 보드레이트 등 설정). bRequest/wValue/wIndex 포함
+Output (JSONL, one line = one USB transfer):
+  {"t": receive time (unix s, as a string to keep precision), "dir": "tx"|"rx"|"ctrl", "hex": data, ...}
+  - tx: PC → sensor (bulk OUT, at URB submission)
+  - rx: sensor → PC (bulk IN, at URB completion)
+  - ctrl: control transfer (CH343 baud rate and other settings). Includes bRequest/wValue/wIndex
 
-사용: python tools/usbpcap_extract.py capture.pcapng [--device 3] [-o out.jsonl]
+Usage: python tools/usbpcap_extract.py capture.pcapng [--device 3] [-o out.jsonl]
 """
 from __future__ import annotations
 
@@ -21,20 +21,20 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
-# USBPcap 의사 헤더 (USBPCAP_BUFFER_PACKET_HEADER, packed little-endian)
+# USBPcap pseudo-header (USBPCAP_BUFFER_PACKET_HEADER, packed little-endian)
 _HDR = struct.Struct("<HQIHBHHBBI")  # headerLen irpId status function info bus device endpoint transfer dataLength
 XFER_ISO, XFER_INTERRUPT, XFER_CONTROL, XFER_BULK = 0, 1, 2, 3
 
 
 @dataclass
 class UsbPacket:
-    t: Decimal          # unix 초
-    info: int           # bit0: 1 = 장치→호스트 완료(PDO→FDO)
+    t: Decimal          # unix s
+    info: int           # bit0: 1 = device→host completion (PDO→FDO)
     bus: int
     device: int
     endpoint: int       # bit7 = IN
     transfer: int
-    stage: Optional[int]  # control 전송 단계 (0 setup, 1 data, 2 status, 3 complete)
+    stage: Optional[int]  # control transfer stage (0 setup, 1 data, 2 status, 3 complete)
     data: bytes
 
 
@@ -44,7 +44,7 @@ def _read_pcapng(buf: bytes) -> Iterator[Tuple[Decimal, bytes]]:
     tsresol: List[Decimal] = []
     while pos + 12 <= len(buf):
         btype, blen = struct.unpack_from(endian + "II", buf, pos)
-        if btype == 0x0A0D0D0A:  # Section Header Block — 바이트 순서 판별
+        if btype == 0x0A0D0D0A:  # Section Header Block — detect byte order
             bom = struct.unpack_from("<I", buf, pos + 8)[0]
             endian = "<" if bom == 0x1A2B3C4D else ">"
             blen = struct.unpack_from(endian + "I", buf, pos + 4)[0]
@@ -91,14 +91,14 @@ def read_packets(path: Path) -> Iterator[UsbPacket]:
 
 
 def extract(path: Path, device: Optional[int] = None) -> List[dict]:
-    """bulk 데이터와 control setup만 시간순으로 뽑는다."""
+    """Extract only bulk data and control setup, in time order."""
     out = []
     for p in read_packets(path):
         if device is not None and p.device != device:
             continue
         from_dev = bool(p.info & 1)
         if p.transfer == XFER_BULK and p.data:
-            # OUT은 제출(호스트→장치) 시점, IN은 완료(장치→호스트) 시점에 데이터가 실린다
+            # OUT carries data at submission (host→device), IN at completion (device→host)
             if (p.endpoint & 0x80) and from_dev:
                 out.append({"t": str(p.t), "dir": "rx", "dev": p.device, "ep": p.endpoint, "hex": p.data.hex()})
             elif not (p.endpoint & 0x80) and not from_dev:
@@ -113,8 +113,8 @@ def extract(path: Path, device: Optional[int] = None) -> List[dict]:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("capture", type=Path)
-    ap.add_argument("--device", type=int, help="USB 장치 주소 (예: 3). 생략하면 전부")
-    ap.add_argument("-o", "--output", type=Path, help="JSONL 출력 파일 (생략하면 stdout)")
+    ap.add_argument("--device", type=int, help="USB device address (e.g. 3). All if omitted")
+    ap.add_argument("-o", "--output", type=Path, help="JSONL output file (stdout if omitted)")
     a = ap.parse_args(argv)
     rows = extract(a.capture, a.device)
     lines = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows)

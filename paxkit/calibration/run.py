@@ -1,17 +1,17 @@
-"""캘리브레이션 1회 실행·결과 추적.
+"""One calibration run and result tracking.
 
-센서로 보내는 명령·순서·대기 시간은 리더(`UsbSensor.calibrate`, PXSR `O3` 454624)가 처리한다.
-리더의 이벤트 루프 안에서 돌아야 PXSR과 실행 순서가 같기 때문이다.
-여기서는 버튼을 누른 뒤 무슨 일이 있었는지만 기록한다 (센서로 보내는 명령은 없음, 앱 쪽 보정도 없음).
+Commands, order and waits sent to the sensor are handled by the reader (`UsbSensor.calibrate`, PXSR `O3` 454624),
+because it must run inside the reader's event loop to keep the same execution order as PXSR.
+This module only records what happened after the button press (no commands to the sensor, no app-side correction).
 
-결과 판정은 PXSR 화면에 보이는 것과 같은 규칙:
-- 응답(addr 3)이 오면 PXSR은 상태를 보지 않고 폴링을 재개하고, 메시지를 띄우지 않는다 → "ack".
-- 응답의 기능 코드가 126이고 상태 바이트가 0이 아니면 PXSR은 `Setting.failed` 경고를 띄운다 → "failed"
-  (그래도 폴링은 재개한다).
-- 응답이 오지 않으면 PXSR은 폴링을 멈춘 채로 둔다 (재시도 없음) → "no_ack". 다시 연결해야 수신이 재개된다.
-  응답 대기 시간(`ack_timeout`)은 PXSR에 없는 값이다 (화면 표시용).
+Outcome follows what the PXSR screen shows:
+- When the response (addr 3) arrives, PXSR resumes polling without checking the status and shows no message → "ack".
+- If the response has function code 126 and a non-zero status byte, PXSR shows a `Setting.failed` warning → "failed"
+  (polling still resumes).
+- If no response arrives, PXSR leaves polling stopped (no retry) → "no_ack". Receiving resumes only after reconnecting.
+  The response wait (`ack_timeout`) is not a PXSR value (for display only).
 
-전후 값(`before`, `after`)은 합력 raw 평균을 보여 주기만 한다 (측정 데이터에 적용하지 않음).
+Before/after values (`before`, `after`) only show resultant raw means (not applied to measurement data).
 """
 from __future__ import annotations
 
@@ -27,15 +27,15 @@ import numpy as np
 
 from ..paths import data_path
 
-ACK_TIMEOUT_S = 2.0   # setCalibration 전송 후 이 시간까지 응답이 없으면 "no_ack"로 표시
-WINDOW_S = 0.5        # 전후 값 평균 구간
+ACK_TIMEOUT_S = 2.0   # shown as "no_ack" if no response within this time after sending setCalibration
+WINDOW_S = 0.5        # averaging window for before/after values
 
 OUTCOME_TEXT = {
-    "pending": "진행 중",
-    "ack": "응답 받음 (PXSR: 메시지 없음, 폴링 재개)",
-    "failed": "실패 응답 (PXSR: Setting.failed 경고, 폴링 재개)",
-    "no_ack": "응답 없음 (PXSR처럼 수신이 멈춘 상태, 다시 연결 필요)",
-    "disconnected": "응답 전에 연결이 끊김",
+    "pending": "in progress",
+    "ack": "response received (PXSR: no message, polling resumed)",
+    "failed": "failure response (PXSR: Setting.failed warning, polling resumed)",
+    "no_ack": "no response (receiving stopped as in PXSR, reconnect needed)",
+    "disconnected": "disconnected before response",
 }
 
 
@@ -45,16 +45,16 @@ def _iso(t: Optional[float]) -> Optional[str]:
 
 @dataclass
 class CalibrationResult:
-    requested: float                     # 버튼을 누른 PC 시각 (Unix 초)
-    sent: Optional[float] = None         # setCalibration 전송 시각
-    acked: Optional[float] = None        # 응답 처리 시각
+    requested: float                     # PC time of the button press (Unix s)
+    sent: Optional[float] = None         # time setCalibration was sent
+    acked: Optional[float] = None        # time the response was handled
     status: Optional[int] = None         # parseUsbData status
-    function_code: Optional[int] = None  # 응답 기능 코드 (캡처는 121)
-    failed: bool = False                 # PXSR이 Setting.failed 경고를 띄우는 응답
+    function_code: Optional[int] = None  # response function code (121 in captures)
+    failed: bool = False                 # response for which PXSR shows a Setting.failed warning
     outcome: str = "pending"             # pending | ack | failed | no_ack | disconnected
-    before: Optional[List[float]] = None  # 요청 전 WINDOW_S 동안 합력 raw 평균 [X, Y, Z]
-    after: Optional[List[float]] = None   # 응답 후 WINDOW_S 동안 합력 raw 평균
-    info: Dict[str, Any] = field(default_factory=dict)   # 포트·센서 타입·serviceID·버전
+    before: Optional[List[float]] = None  # resultant raw mean over WINDOW_S before the request [X, Y, Z]
+    after: Optional[List[float]] = None   # resultant raw mean over WINDOW_S after the response
+    info: Dict[str, Any] = field(default_factory=dict)   # port, sensor type, serviceID, version
 
     @property
     def done(self) -> bool:
@@ -76,9 +76,9 @@ def _mean(buffer, t0: float, t1: float) -> Optional[List[float]]:
 
 
 class CalibrationRun:
-    """버튼 한 번. `start()` 뒤 `poll()`을 주기적으로 부르거나 `wait()`로 끝날 때까지 기다린다.
+    """One button press. After `start()`, call `poll()` periodically or `wait()` until done.
 
-    PXSR처럼 중복 클릭을 막지 않으므로, 진행 중에 또 누르면 각 실행은 자기 시작 뒤의 첫 전송·응답을 잡는다.
+    Double clicks are not blocked (as in PXSR), so if pressed again while running, each run picks up the first send/response after its own start.
     """
 
     def __init__(self, sensor, info: Optional[Dict[str, Any]] = None, *,
@@ -119,7 +119,7 @@ class CalibrationRun:
         self.sensor.remove_listener(self._on_event)
 
     def poll(self, now: Optional[float] = None) -> bool:
-        """끝났으면 True. now는 PC 시각 (기본 센서 시계)."""
+        """True when done. now is PC time (default: sensor clock)."""
         now = self.sensor.clock.wall() if now is None else now
         with self._lock:
             r = self.result
@@ -145,7 +145,7 @@ def history_path() -> Path:
 
 
 def append_history(result: CalibrationResult, path: Optional[Path] = None) -> Path:
-    """캘리브레이션 실행 기록을 한 줄씩 덧붙인다 (`data/calibration/history.jsonl`). 값은 저장하지 않는다."""
+    """Append one line per calibration run (`data/calibration/history.jsonl`). No values are stored."""
     path = path or history_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "ab") as f:

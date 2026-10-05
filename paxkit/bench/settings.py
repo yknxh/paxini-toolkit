@@ -1,4 +1,4 @@
-"""게이지 테스트 설정 (`config.yaml`의 `bench:`, 계획 P6-4). 빠진 값은 아래 기본값."""
+"""Gauge test settings (`bench:` in `config.yaml`, plan P6-4). Missing values fall back to the defaults below."""
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
@@ -17,11 +17,11 @@ DEFAULTS: Dict[str, Any] = {
     "bin_N": 1.0,
     "zone_min_samples": 20,
     "lag_warn_s": 0.1,
-    "lag_correct": True,   # 세션마다 남은 게이지 지연을 상호상관으로 재서 짝짓기 전에 보정
-    "lag_min_r": 0.8,      # 상관이 이보다 낮으면 보정하지 않음 (추정을 믿기 어려움)
+    "lag_correct": True,   # measure the remaining gauge lag per session by cross-correlation and correct it before pairing
+    "lag_min_r": 0.8,      # no correction if the correlation is below this (estimate unreliable)
     "simultaneous_ratio": 0.5,
     "hand_order": ["A1", "A2", "B1", "B2"],
-    "rated_N": 25.0,   # %FS 기준 (config `sensor_types.*.rated_N`, 두 타입 모두 25 N)
+    "rated_N": 25.0,   # %FS reference (config `sensor_types.*.rated_N`, 25 N for both types)
 }
 
 
@@ -38,6 +38,6 @@ def bench_settings(cfg=None, override: Optional[Dict[str, Any]] = None) -> Dict[
 
 
 def force_bins(s: Dict[str, Any]):
-    """커버리지 힘 구간 경계: 0 ~ max_N 을 3등분 (15 N이면 0~5 / 5~10 / 10~15, 마지막 구간은 그 위도 포함)."""
+    """Coverage force-bin edges: 0 ~ max_N split into thirds (15 N → 0~5 / 5~10 / 10~15; the last bin also covers values above)."""
     m = float(s["max_N"])
     return [0.0, m / 3, 2 * m / 3]

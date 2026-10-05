@@ -1,4 +1,4 @@
-"""스레드 안전한 시계열 링 버퍼 (라이브 표시용). paxtest `devices/buffers.py`에서 이전."""
+"""Thread-safe time-series ring buffer (for live display). Ported from paxtest `devices/buffers.py`."""
 from __future__ import annotations
 
 import threading

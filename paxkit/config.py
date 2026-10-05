@@ -1,4 +1,4 @@
-"""config.yaml 로딩 (paxtest/config.py에서 이전)."""
+"""config.yaml loading (ported from paxtest/config.py)."""
 from __future__ import annotations
 
 import copy

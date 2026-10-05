@@ -1,8 +1,8 @@
-"""USB 리더(`UsbSensor`)가 PXSR과 같은 명령을 같은 순서·간격으로 보내는지 확인한다 (계획 P2).
+"""Check that the USB reader (`UsbSensor`) sends the same commands as PXSR in the same order and timing (plan P2).
 
-캡처 재생: 캡처의 PXSR 명령 순서를 기대값으로 두고, 우리 리더가 보낸 명령이 다음 기대 명령과 같으면
-캡처에 있던 센서 응답 조각을 캡처와 같은 지연으로 돌려준다. 가상 시계라 실제로 기다리지 않는다.
-→ 리더가 보낸 명령 전체가 PXSR이 보낸 명령 전체와 바이트 단위로 같아야 한다.
+Capture replay: the PXSR command sequence in the capture is the expectation; when our reader sends the next expected command,
+the captured sensor response chunks are returned with the captured delays. Virtual clock, so no real waiting.
+→ All commands sent by the reader must be byte-identical to all commands sent by PXSR.
 """
 import pytest
 
@@ -24,7 +24,7 @@ def test_commands_equal_capture(replay):
     sent = [d for _, d in tr.written]
     expected = [st[0] for st in tr.steps]
     assert sent[:len(expected)] == expected
-    # 마지막 응답 뒤 PXSR 코드대로 5 ms 뒤 요청 하나를 더 보낸다 (캡처는 포트를 닫으며 끝남)
+    # after the last response, one more request goes out 5 ms later per PXSR code (the capture ends by closing the port)
     assert sent[len(expected):] == [expected[-1]]
     assert s.status == "disconnected" and not tr.is_open
 
@@ -43,10 +43,10 @@ def test_frames_equal_capture(replay):
 def test_timing_equal_pxsr_code(replay):
     _, (tr, _, _, calls) = replay
     t = [w[0] for w in tr.written]
-    # P1: 버전 조회 0.1 s 간격, 마지막 대기 뒤 첫 데이터 요청
+    # P1: version queries 0.1 s apart, first data request after the last wait
     for k in range(10):
         assert t[k] == pytest.approx(0.1 * k, abs=1e-9)
-    # y0: 데이터 응답을 받은 뒤 5 ms 뒤 다음 요청 (응답 확인 간격 1 ms만큼 늦을 수 있음)
+    # y0: next request 5 ms after a data response (may be late by up to the 1 ms receive check interval)
     done = dict(tr.rx_done)
     n_checked = 0
     for k in range(9, len(t) - 1):
@@ -55,7 +55,7 @@ def test_timing_equal_pxsr_code(replay):
             assert 0.005 - 1e-9 <= t[k + 1] - done[k] <= 0.005 + 1e-9, k
             n_checked += 1
     assert n_checked > 300
-    # O3: 버튼 → 0.5 s 뒤 setCalibration (버튼 요청은 다음 확인 주기에 처리)
+    # O3: button → setCalibration 0.5 s later (button request handled on the next check cycle)
     has_cal = any(st[0][6] == codec.USB_FUNC_WRITE for st in tr.steps)
     assert bool(calls) == has_cal
     for k, t_btn in calls.items():
@@ -70,7 +70,7 @@ def _sim(sensor="S1813E", service_id=3, specification="S1813E"):
 
 
 def _drive(clock, s, until):
-    """가상 시계로 until 시각까지 리더 루프를 돌린다."""
+    """Run the reader loop on the virtual clock until time `until`."""
     s.transport.open()
     s._spawn(s._scan())
     while clock.now() < until and not s._closed:
@@ -89,8 +89,8 @@ def test_sim_detects_sensor_type_and_slot():
 
 
 def test_no_response_polls_service_id_1_with_last_type():
-    """버전 응답이 없으면 PXSR처럼 serviceID 1, 저장된 타입의 taxel 수로 요청하고 멈춘다."""
-    clock, tr, s = _sim("S1813E", service_id=12, specification="S2015")   # 0..8 밖이라 응답 없음
+    """Without a version response, request serviceID 1 with the saved type's taxel count and stop, as PXSR does."""
+    clock, tr, s = _sim("S1813E", service_id=12, specification="S2015")   # outside 0..8, so no response
     _drive(clock, s, 3.0)
     sent = [d for _, d in tr.written]
     assert sent == [codec.usb_get_version(i) for i in range(9)] + [codec.usb_get_type_data(1, 52)]
@@ -107,11 +107,11 @@ def test_calibration_and_disconnect_sequence():
     cal = [i for i, (_, d) in enumerate(sent) if d == codec.usb_set_calibration(3)]
     assert len(cal) == 1
     i = cal[0]
-    # 캘리브레이션 직전 요청의 응답 뒤로는 요청이 없고, ack 직후 폴링 재개
-    assert sent[i][0] - sent[i - 1][0] >= 0.49   # 버튼 직전 대기 중이던 요청 하나는 나갈 수 있다 (PXSR 동일)
+    # no requests after the response to the request just before calibration; polling resumes right after the ack
+    assert sent[i][0] - sent[i - 1][0] >= 0.49   # one request already waiting before the button may go out (same as PXSR)
     assert sent[i + 1][1] == codec.usb_get_type_data(3, 31)
     assert sent[i + 1][0] - sent[i][0] == pytest.approx(tr.response_delay, abs=0.0011)
-    # 해제: 기록(sink)은 바로 멈추고, 폴링은 0.88 s 동안 계속되다 포트를 닫는다
+    # disconnect: logging (sink) stops at once, polling continues for 0.88 s, then the port closes
     n_frames = len(frames)
     t_dc = clock.now()
     s.disconnect()

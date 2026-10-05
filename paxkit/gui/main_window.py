@@ -1,4 +1,4 @@
-"""메인 창: 왼쪽 장치 패널 + 가운데 탭 (라이브 / 캘리브레이션 / 테스트 / 결과). 어두운 테마 (계획 P7)."""
+"""Main window: device panels on the left + tabs in the center (Live / Calibration / Test / Results). Dark theme (plan P7)."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -26,7 +26,7 @@ from .recording_panel import RecordingPanel
 
 class MainWindow(QMainWindow):
     def __init__(self, cfg: Config) -> None:
-        theme.apply()   # pyqtgraph 색은 그래프 위젯을 만들기 전에 정해야 한다
+        theme.apply()   # pyqtgraph colors must be set before any plot widget is created
         super().__init__()
         self.cfg = cfg
         self.setWindowTitle(f"paxkit {__version__}")
@@ -41,7 +41,7 @@ class MainWindow(QMainWindow):
         self.device.sensor_changed.connect(self.live.set_sensor)
         self.device.sensor_changed.connect(self._on_sensor)
         self.device.sensor_event.connect(self._on_sensor_event)
-        self.notice: Optional[QMessageBox] = None   # 마지막 알림 창 (테스트에서 확인)
+        self.notice: Optional[QMessageBox] = None   # last notice box (checked in tests)
         self._tray: Optional[QSystemTrayIcon] = None
         self.calibration.finished.connect(self.recording.note_calibration)
         self.calibration.finished.connect(self.bench.note_calibration)
@@ -59,17 +59,17 @@ class MainWindow(QMainWindow):
         left_lay.addWidget(self.gauge)
         left_lay.addWidget(self.recording)
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.live, "라이브")
-        self.tabs.addTab(self.calibration, "캘리브레이션")
-        self.tabs.addTab(self.bench, "테스트")
-        self.tabs.addTab(self.results, "결과")
+        self.tabs.addTab(self.live, "Live")
+        self.tabs.addTab(self.calibration, "Calibration")
+        self.tabs.addTab(self.bench, "Test")
+        self.tabs.addTab(self.results, "Results")
         split = QSplitter(Qt.Horizontal)
         split.addWidget(left)
         split.addWidget(self.tabs)
         split.setStretchFactor(1, 1)
         split.setSizes([320, 880])
         self.setCentralWidget(split)
-        self.statusBar().addWidget(QLabel(f"데이터 폴더: {DATA_DIR}"))
+        self.statusBar().addWidget(QLabel(f"Data folder: {DATA_DIR}"))
 
     def _on_sensor(self, s) -> None:
         info = self.device.connection_info() if s is not None else None
@@ -81,18 +81,18 @@ class MainWindow(QMainWindow):
     def _on_sensor_event(self, kind: str, info: dict) -> None:
         if kind != "stalled":
             return
-        # 리더가 이미 기록(sink)을 멈췄다 (멈춘 시점까지 저장). 화면 쪽 정리 + 알림
+        # The reader has already stopped the recordings (sinks), saved up to the stall. Clean up the UI + notify
         saved = [p for p in (self.recording.on_stalled(), self.bench.on_stalled(info)) if p is not None]
         last = info.get("t")
         when = datetime.fromtimestamp(last).strftime("%H:%M:%S.%f")[:-3] if last else "-"
-        text = (f"센서 수신이 멈췄습니다 (마지막 프레임 {when}, {info.get('stall_s'):g}초 넘게 데이터 없음).\n"
-                "PXSR과 같이 자동으로 다시 요청하지 않습니다. 계속하려면 연결 해제 후 다시 연결하세요.")
+        text = (f"Sensor data stalled (last frame {when}, no data for over {info.get('stall_s'):g} s).\n"
+                "As in PXSR, data is not re-requested automatically. To continue, disconnect and reconnect.")
         if saved:
-            text += "\n\n진행 중이던 기록은 멈춘 시점까지 저장하고 정지했습니다:\n" + "\n".join(p.name for p in saved)
-        self.notify("센서 수신 멈춤", text)
+            text += "\n\nRecordings in progress were saved up to the stall and stopped:\n" + "\n".join(p.name for p in saved)
+        self.notify("Sensor data stalled", text)
 
     def notify(self, title: str, text: str) -> None:
-        """창 안 알림(막지 않는 메시지 창) + 작업 표시줄 깜빡임 + 시스템 알림 (트레이를 쓸 수 있을 때)."""
+        """In-window notice (non-blocking message box) + taskbar flash + system notification (when a tray is available)."""
         self.statusBar().showMessage(f"{title}: {text.splitlines()[0]}", 60_000)
         box = QMessageBox(QMessageBox.Warning, title, text, QMessageBox.Ok, self)
         box.setWindowModality(Qt.NonModal)
@@ -113,14 +113,14 @@ class MainWindow(QMainWindow):
     def _on_analyzed(self, res) -> None:
         self.bench.analysis_done(res)
         self.results.show_result(res)
-        self.tabs.setCurrentWidget(self.results)   # 정지 후 결과 탭 자동으로 열기
+        self.tabs.setCurrentWidget(self.results)   # open the Results tab automatically after stopping
 
     def _on_analysis_failed(self, msg: str) -> None:
-        self.bench.lbl_rec.setText(f"분석 실패: {msg} (기록 파일은 남아 있음, 결과 탭에서 재분석)")
+        self.bench.lbl_rec.setText(f"Analysis failed: {msg} (recorded files kept; re-analyze from the Results tab)")
         self.results.refresh()
 
     def _link_sim(self) -> None:
-        """시뮬레이션 게이지 + 시뮬레이션 센서면 같은 하중을 읽게 한다 (겹쳐 보기·지연 확인용)."""
+        """With a simulated gauge + simulated sensor, make both read the same load (for overlay and lag checks)."""
         g, s = self.gauge.gauge, self.device.sensor
         if isinstance(g, SimGauge):
             tr = getattr(s, "transport", None)
@@ -129,7 +129,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, ev) -> None:
         if self._tray is not None:
             self._tray.hide()
-        self.bench.stop_recording(cancel=True, reason="창을 닫아 기록을 멈췄습니다")
+        self.bench.stop_recording(cancel=True, reason="Recording stopped: window closed")
         self.recording.stop()
         self.gauge.disconnect_gauge()
         self.device.shutdown()

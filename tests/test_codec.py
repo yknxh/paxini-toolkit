@@ -6,7 +6,7 @@ def test_checksum():
 
 
 def test_usb_commands_match_capture():
-    # 2026-10-04 S1813E 캡처에서 PXSR이 보낸 바이트
+    # bytes sent by PXSR in the 2026-10-04 S1813E capture
     assert codec.usb_get_version(0).hex() == "55aa09000000fbd41700006400ae"
     assert codec.usb_get_version(3).hex() == "55aa09000300fbd41700006400ab"
     assert codec.usb_get_type_data(3, 31).hex() == "55aa09000300fbf00300007b008c"

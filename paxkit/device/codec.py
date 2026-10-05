@@ -1,23 +1,23 @@
-"""PXSR 프로토콜 명령 생성·응답 파싱 (순수 함수, 시리얼 없음).
+"""PXSR protocol command building and response parsing (pure functions, no serial).
 
-PXSR v1.0.7 렌더러 번들 `dist/index.3bcb906d.js`를 1:1로 옮긴다. 출처 offset은 그 파일의 바이트 위치.
-PXSR 코드가 이상해 보여도 고치지 않는다 (CLAUDE.md 최우선 원칙).
+1:1 port of the PXSR v1.0.7 renderer bundle `dist/index.3bcb906d.js`. Source offsets are byte positions in that file.
+Do not fix PXSR code even if it looks odd (top rule in CLAUDE.md).
 
-지금은 USB 직결(`Na0`) 부분과 HAND(`ka0`) 캘리브레이션 명령만 있다. HAND 나머지는 P1b 이후 추가.
+Currently only the USB direct (`Na0`) part and the HAND (`ka0`) calibration command. Rest of HAND after P1b.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-# ── 센서 타입 표 `o8` (~410477): 버전 문자열에 name이 들어 있는 첫 항목을 고른다 ──
+# ── Sensor type table `o8` (~410477): pick the first entry whose name is in the version string ──
 @dataclass(frozen=True)
 class SensorType:
     label: str
     text: str
     module: int
     name: str
-    forces: int   # taxel 수
+    forces: int   # taxel count
 
 
 SENSOR_TYPES: List[SensorType] = [
@@ -35,7 +35,7 @@ SENSOR_TYPES: List[SensorType] = [
     SensorType("M2020", "MC-M2020", 8, "PXSR-STDMC03A", 9),
 ]
 
-# PXSR 화면의 기본 taxel 수 `E=f0(239)` (~445300). 버전 응답으로 타입을 찾기 전까지 쓰인다.
+# Default taxel count on the PXSR screen `E=f0(239)` (~445300). Used until the type is found from the version response.
 DEFAULT_FORCES = 239
 
 
@@ -47,9 +47,9 @@ def find_sensor_type(version: str) -> Optional[SensorType]:
     return None
 
 
-# ── 공통 ─────────────────────────────────────────────────────────
+# ── Common ───────────────────────────────────────────────────────
 def checksum(data) -> int:
-    """`ti` (~339145): 앞 바이트 합의 2의 보수."""
+    """`ti` (~339145): two's complement of the sum of the preceding bytes."""
     if not data:
         raise ValueError("Invalid buffer: buffer cannot be empty")
     o = 0
@@ -59,23 +59,23 @@ def checksum(data) -> int:
 
 
 def _a2(value: int, n: int = 4) -> List[int]:
-    """`A2` (~339049): n=2면 UInt16LE, 아니면 UInt32LE."""
+    """`A2` (~339049): UInt16LE if n=2, otherwise UInt32LE."""
     return list(value.to_bytes(2 if n == 2 else 4, "little"))
 
 
 def _int8(b: Optional[int]) -> int:
-    """JS `b << 24 >> 24`. `undefined`(None)는 JS에서 0이 된다."""
+    """JS `b << 24 >> 24`. `undefined` (None) becomes 0 in JS."""
     if b is None:
         return 0
     return b - 256 if b >= 128 else b
 
 
 def _at(buf: bytes, i: int) -> Optional[int]:
-    """JS `Buffer[i]`: 범위 밖이면 `undefined`(None)."""
+    """JS `Buffer[i]`: `undefined` (None) when out of range."""
     return buf[i] if i < len(buf) else None
 
 
-# ── USB 직결 `Na0` (~412891) ─────────────────────────────────────
+# ── USB direct `Na0` (~412891) ───────────────────────────────────
 USB_BAUDRATE = 921600
 USB_HEADER = [85, 170]   # cmdHeader `e`
 USB_FUNC_READ = 251
@@ -84,7 +84,7 @@ USB_ADDR_CALIBRATION = 3
 USB_ADDR_SET_ID = 35
 USB_ADDR_DATA = 1008
 USB_ADDR_VERSION = 6100
-USB_SCAN_IDS = range(9)  # 연결 시 버전 조회하는 serviceID 0..8 (캡처 2026-10-04 확인)
+USB_SCAN_IDS = range(9)  # serviceIDs 0..8 queried for version on connect (confirmed by capture 2026-10-04)
 
 
 def usb_get_version(service_id: int) -> bytes:
@@ -103,7 +103,7 @@ def usb_get_type_data(service_id: int, forces: int) -> bytes:
 
 
 def usb_set_calibration(service_id: int) -> bytes:
-    """`setCalibration`: addr 3에 1을 쓴다."""
+    """`setCalibration`: writes 1 to addr 3."""
     d = [*USB_HEADER, 10, 0]
     d += [service_id, 0, 121, *_a2(3, 4), *_a2(1, 2), 1]
     d.append(checksum(d))
@@ -112,27 +112,27 @@ def usb_set_calibration(service_id: int) -> bytes:
 
 @dataclass
 class UsbParsed:
-    """`parseUsbData`의 반환값 `y`."""
+    """Return value `y` of `parseUsbData`."""
     serviceID: int = 0
     frameLength: int = 0
     functionCode: int = 0
     startAddress: int = 0
     parsedata: list = field(default_factory=list)
     status: int = 0
-    warning: Optional[str] = None   # PXSR이 J3.warning(Setting.failed)를 띄우는 경우
+    warning: Optional[str] = None   # when PXSR shows J3.warning(Setting.failed)
 
 
 class UsbParser:
-    """`parseUsbData(d, m)`: 받은 조각을 버퍼(`usbDataView`)에 이어 붙이고 프레임 하나를 해석한다.
+    """`parseUsbData(d, m)`: appends the received chunk to the buffer (`usbDataView`) and parses one frame.
 
-    status: -1 = 아직 덜 받음(버퍼 유지), 0 = 성공, 1 = 실패. 성공·실패 시 버퍼를 비운다.
+    status: -1 = incomplete (buffer kept), 0 = success, 1 = failure. The buffer is cleared on success or failure.
     """
 
     def __init__(self) -> None:
         self.buf = b""
 
     def reset(self) -> None:
-        """`getVersion` 호출 시 `i.value = Buffer.from([])`."""
+        """`i.value = Buffer.from([])` when `getVersion` is called."""
         self.buf = b""
 
     def feed(self, d: bytes, m: int) -> UsbParsed:
@@ -180,7 +180,7 @@ class UsbParser:
             return y
         if a == 1008:
             s = b[14:len(b) - 1]
-            # 프레임이 짧으면 JS는 undefined를 그대로 둔다 (None). CSV에는 빈 칸으로 쓰인다 (csv-writer).
+            # If the frame is short, JS leaves undefined as is (None). Written as an empty field in the CSV (csv-writer).
             combine = [_int8(_at(s, 0)), _int8(_at(s, 1)), _at(s, 2)]
             w = list(s[30:30 + m * 3])
             grid = [v if (i + 1) % 3 == 0 else _int8(v) for i, v in enumerate(w)]
@@ -193,15 +193,15 @@ class UsbParser:
             y.parsedata = text.split("\n")
             self.buf = b""
             return y
-        return y   # default: 버퍼를 비우지 않는다 (PXSR 그대로)
+        return y   # default: buffer is not cleared (as in PXSR)
 
 
-# ── HAND 보드 `ka0` (~415602) — 지금은 캘리브레이션 명령만 (리더는 P1b 이후) ──
+# ── HAND board `ka0` (~415602) — calibration command only for now (reader after P1b) ──
 HAND_HEADER = [85, 170]   # `t`
 
 
 def hand_checksum(data) -> int:
-    """`$9` (~338987): `(합 & 255 ^ 255) + 1 & 255`. 빈 배열도 오류 없이 0."""
+    """`$9` (~338987): `(sum & 255 ^ 255) + 1 & 255`. An empty array gives 0 without error."""
     e = 0
     for b in data:
         e = (e + b) & 255
@@ -209,7 +209,7 @@ def hand_checksum(data) -> int:
 
 
 def hand_set_calibration() -> bytes:
-    """`setHandCalibration` (~417809): `[...t, 0, 23, ...A2(2,2), ...A2(1,2), 1]` + `$9`. serviceID 없음."""
+    """`setHandCalibration` (~417809): `[...t, 0, 23, ...A2(2,2), ...A2(1,2), 1]` + `$9`. No serviceID."""
     m = [*HAND_HEADER, 0, 23, *_a2(2, 2), *_a2(1, 2), 1]
     m.append(hand_checksum(m))
     return bytes(m)

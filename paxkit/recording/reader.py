@@ -1,8 +1,8 @@
-"""PXSR 형식 CSV 읽기 — 우리 기록(`data/logs/`)과 PXSR 기록(`DataLogging/`)을 같은 함수로 읽는다.
+"""Reading PXSR-format CSV — our logs (`data/logs/`) and PXSR logs (`DataLogging/`) are read by the same function.
 
-열 이름 `{채널}-{슬롯}-1x1-X|Y|Z` (합력), `{채널}-{슬롯}-NxN-X|Y|Z[i]` (taxel). 값은 raw 정수 (× 0.1 = N).
-`Timestamp`는 `HH:mm:ss.SSS`뿐이라 날짜는 파일명(`YYYY-MM-DD-HHMMSS.csv`)에서 가져오고,
-시각이 12시간 넘게 뒤로 가면 자정을 넘은 것으로 보고 하루를 더한다 (`paxtest` `parse_timestamp_column`과 같은 규칙).
+Column names `{channel}-{slot}-1x1-X|Y|Z` (resultant), `{channel}-{slot}-NxN-X|Y|Z[i]` (taxel). Values are raw ints (× 0.1 = N).
+`Timestamp` is only `HH:mm:ss.SSS`, so the date comes from the file name (`YYYY-MM-DD-HHMMSS.csv`), and
+if the time goes back by more than 12 hours it is taken as crossing midnight and a day is added (same rule as `paxtest` `parse_timestamp_column`).
 """
 from __future__ import annotations
 
@@ -19,13 +19,13 @@ FILE_DATE_RX = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 FORCE_COL_RX = re.compile(r"^(\d+)-(\d+)-1x1-([XYZ])$")
 TAXEL_COL_RX = re.compile(r"^(\d+)-(\d+)-NxN-([XYZ])\[(\d+)\]$")
 
-SensorKey = Tuple[int, int]   # (채널, 슬롯)
+SensorKey = Tuple[int, int]   # (channel, slot)
 
 
 @dataclass
 class SensorColumns:
-    force: Dict[str, str] = field(default_factory=dict)              # "X"/"Y"/"Z" → 열 이름
-    taxels: Dict[str, List[str]] = field(default_factory=dict)       # "X"/"Y"/"Z" → taxel 번호 순 열 이름
+    force: Dict[str, str] = field(default_factory=dict)              # "X"/"Y"/"Z" → column name
+    taxels: Dict[str, List[str]] = field(default_factory=dict)       # "X"/"Y"/"Z" → column names in taxel order
 
     @property
     def n_taxels(self) -> int:
@@ -33,7 +33,7 @@ class SensorColumns:
 
 
 def sensor_columns(header: List[str]) -> Dict[SensorKey, SensorColumns]:
-    """헤더 → {(채널, 슬롯): 열 이름} (헤더에 나온 순서)."""
+    """Header → {(channel, slot): column names} (in header order)."""
     out: Dict[SensorKey, SensorColumns] = {}
     found: Dict[SensorKey, Dict[str, Dict[int, str]]] = {}
     for h in header:
@@ -53,7 +53,7 @@ def sensor_columns(header: List[str]) -> Dict[SensorKey, SensorColumns]:
 
 
 def file_day0(path: Path) -> float:
-    """파일명 날짜의 로컬 자정 (Unix 초). 날짜가 없으면 수정 시각의 날짜."""
+    """Local midnight of the file name date (Unix s). If no date, the date of the modification time."""
     m = FILE_DATE_RX.search(path.name)
     if m:
         d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
@@ -63,7 +63,7 @@ def file_day0(path: Path) -> float:
 
 
 def timestamps_to_unix(text: pd.Series, day0: float) -> np.ndarray:
-    """`HH:mm:ss.SSS` 열 → Unix 초. 자정 넘김 처리."""
+    """`HH:mm:ss.SSS` column → Unix s. Handles crossing midnight."""
     parts = text.astype(str).str.split(":", expand=True)
     sec = (parts[0].astype(int) * 3600 + parts[1].astype(int) * 60).to_numpy(dtype=float) \
         + parts[2].astype(float).to_numpy()
@@ -75,17 +75,17 @@ def timestamps_to_unix(text: pd.Series, day0: float) -> np.ndarray:
 class LogData:
     path: Path
     header: List[str]
-    t: np.ndarray                 # 행마다 Unix 초
-    raw: pd.DataFrame             # Timestamp 를 뺀 raw 값 (열 이름 = 헤더)
+    t: np.ndarray                 # Unix s per row
+    raw: pd.DataFrame             # raw values without Timestamp (column names = header)
     sensors: Dict[SensorKey, SensorColumns]
 
     def force_raw(self, key: SensorKey) -> np.ndarray:
-        """(n, 3) 합력 raw X, Y, Z."""
+        """(n, 3) resultant raw X, Y, Z."""
         c = self.sensors[key].force
         return self.raw[[c["X"], c["Y"], c["Z"]]].to_numpy(dtype=float)
 
     def taxel_raw(self, key: SensorKey, axis: str = "Z") -> np.ndarray:
-        """(n, taxel 수) 한 축의 taxel raw."""
+        """(n, taxel count) taxel raw of one axis."""
         return self.raw[self.sensors[key].taxels.get(axis, [])].to_numpy(dtype=float)
 
 

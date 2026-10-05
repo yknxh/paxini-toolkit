@@ -1,16 +1,16 @@
-"""PXSR 데이터 로깅 CSV의 바이트 규칙 — PXSR 코드와 `csv-writer` 1.6.0 소스를 1:1로 옮긴다.
+"""Byte rules of the PXSR data logging CSV — 1:1 port of PXSR code and the `csv-writer` 1.6.0 source.
 
-| 출처                                                     | 여기 |
+| Source                                                   | Here |
 |----------------------------------------------------------|------|
-| PXSR `rs0` 파일명 (338314)                               | `rs0()`, `log_filename()` |
+| PXSR `rs0` file name (338314)                            | `rs0()`, `log_filename()` |
 | PXSR `U2().format("HH:mm:ss.SSS")` (dayjs, `y0` 448712)  | `format_timestamp()` |
-| PXSR `W0` 헤더 (453877)                                  | `build_header()` |
-| PXSR `y0` 1008 처리의 행 `T1` (449663)                   | `build_row()` |
+| PXSR `W0` header (453877)                                | `build_header()` |
+| PXSR row `T1` in `y0` 1008 handling (449663)             | `build_row()` |
 | csv-writer `DefaultFieldStringifier`·`CsvStringifier`    | `stringify_field()`, `csv_line()`, `join_records()` |
 | csv-writer `CsvWriter` + `FileWriter`                    | `CsvFileWriter` |
 
-`sensors`는 PXSR 화면 상태 `v.value`와 같은 모양이다: 채널 목록 → 슬롯 목록 → 그 슬롯의 마지막 프레임
-(빈 자리는 None = JS 배열의 빈 칸). `UsbSensor.sensors`가 이 값을 PXSR과 같은 시점에 갱신한다.
+`sensors` has the same shape as the PXSR screen state `v.value`: list of channels → list of slots → last frame of that slot
+(empty places are None = holes in a JS array). `UsbSensor.sensors` updates it at the same points as PXSR.
 """
 from __future__ import annotations
 
@@ -23,13 +23,13 @@ from typing import List, Optional, Sequence, Union
 Cell = Union[int, str, bool, None]
 
 FIELD_DELIMITER = ","     # csv-writer DEFAULT_FIELD_DELIMITER
-RECORD_DELIMITER = "\n"   # csv-writer DEFAULT_RECORD_DELIMITER (CRLF 아님)
-FILENAME_FORMAT = "YYYY-MM-dd-HHmmSS"   # gs0 생성자
+RECORD_DELIMITER = "\n"   # csv-writer DEFAULT_RECORD_DELIMITER (not CRLF)
+FILENAME_FORMAT = "YYYY-MM-dd-HHmmSS"   # gs0 constructor
 
 
-# ── 파일명 ───────────────────────────────────────────────────────────
+# ── File name ────────────────────────────────────────────────────────
 def rs0(t: datetime, e: str) -> str:
-    """PXSR `rs0(t, e)` (338314). 키 순서·첫 번째 일치만 바꾸는 동작까지 그대로."""
+    """PXSR `rs0(t, e)` (338314). Kept as is, down to key order and replacing only the first match."""
     o = {
         "Y+": str(t.year), "y+": str(t.year),
         "M+": str(t.month),
@@ -47,28 +47,28 @@ def rs0(t: datetime, e: str) -> str:
 
 
 def log_filename(start: datetime) -> str:
-    """gs0: `rs0(new Date, "YYYY-MM-dd-HHmmSS") + ".csv"` — 기록 시작 시각(로컬)."""
+    """gs0: `rs0(new Date, "YYYY-MM-dd-HHmmSS") + ".csv"` — logging start time (local)."""
     return rs0(start, FILENAME_FORMAT) + ".csv"
 
 
 # ── Timestamp ────────────────────────────────────────────────────────
 def format_timestamp(t: float) -> str:
-    """dayjs `format("HH:mm:ss.SSS")`, 로컬 시간.
+    """dayjs `format("HH:mm:ss.SSS")`, local time.
 
-    JS Date는 정수 ms(내림)다. t(Unix 초, float)는 µs 단위로 먼저 반올림해 float 오차로
-    ms가 하나 내려가는 것을 막는다 (float64는 현재 시각에서 약 0.24 µs 정밀도).
+    JS Date is integer ms (floored). t (Unix s, float) is first rounded to µs so float error
+    cannot drop the ms by one (float64 has about 0.24 µs precision at the current time).
     """
     ms = round(t * 1_000_000) // 1000
     lt = time.localtime(ms // 1000)
     return f"{lt.tm_hour:02d}:{lt.tm_min:02d}:{lt.tm_sec:02d}.{ms % 1000:03d}"
 
 
-# ── 헤더·행 (PXSR) ───────────────────────────────────────────────────
+# ── Header and rows (PXSR) ───────────────────────────────────────────
 def build_header(sensors: Sequence[Optional[Sequence]]) -> List[str]:
     """PXSR `W0` (453877).
 
-    `v.value.forEach((U0,Q0)=>{U0&&U0.forEach((l1,g1)=>{...})})` — 빈 칸(None)은 forEach가 건너뛴다.
-    taxel 열 수는 `for(o2=0; o2<multiGrid.length/3; o2++)` 이므로 ceil(len/3).
+    `v.value.forEach((U0,Q0)=>{U0&&U0.forEach((l1,g1)=>{...})})` — forEach skips holes (None).
+    The taxel column count is ceil(len/3), since it is `for(o2=0; o2<multiGrid.length/3; o2++)`.
     """
     d0 = ["Timestamp"]
     for q0, u0 in enumerate(sensors):
@@ -86,11 +86,11 @@ def build_header(sensors: Sequence[Optional[Sequence]]) -> List[str]:
 
 
 def build_row(timestamp: str, sensors: Sequence[Optional[Sequence]]) -> List[Cell]:
-    """PXSR `y0` 1008 처리 (449663): `T1=[시각]; v.value.forEach(f3=>f3.forEach(D1=>{D1&&T1.push(
+    """PXSR `y0` 1008 handling (449663): `T1=[time]; v.value.forEach(f3=>f3.forEach(D1=>{D1&&T1.push(
     ...D1.combineForce.concat(D1.multiGrid))}))`."""
     t1: List[Cell] = [timestamp]
     for f3 in sensors:
-        for d1 in f3 or ():   # USB는 채널 0만 있고 항상 배열이다
+        for d1 in f3 or ():   # USB has only channel 0, and it is always an array
             if d1 is not None:
                 t1.extend(d1.combine)
                 t1.extend(d1.grid)
@@ -99,24 +99,24 @@ def build_row(timestamp: str, sensors: Sequence[Optional[Sequence]]) -> List[Cel
 
 # ── csv-writer 1.6.0 ─────────────────────────────────────────────────
 def js_string(value: Cell) -> str:
-    """JS `String(value)` 중 기록에 나오는 타입만 (정수·문자열·불리언).
+    """JS `String(value)`, only for the types that appear in logs (int, string, boolean).
 
-    float는 JS 숫자 표기(지수 규칙 등)가 Python과 달라 받지 않는다 (PXSR raw 값은 모두 정수).
+    floats are rejected because JS number formatting (exponent rules etc.) differs from Python (PXSR raw values are all ints).
     """
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, int):
-        if abs(value) >= 10 ** 21:   # JS는 1e21부터 지수 표기
-            raise ValueError(f"JS 지수 표기 범위의 정수는 지원하지 않음: {value}")
+        if abs(value) >= 10 ** 21:   # JS uses exponent notation from 1e21
+            raise ValueError(f"integers in JS exponent-notation range are not supported: {value}")
         return str(value)
     if isinstance(value, str):
         return value
-    raise TypeError(f"지원하지 않는 값 타입: {type(value).__name__}")
+    raise TypeError(f"unsupported value type: {type(value).__name__}")
 
 
 def stringify_field(value: Cell) -> str:
-    """`DefaultFieldStringifier.stringify`: 빈 값(undefined·null·'')은 빈 칸,
-    `,` `\\n` `"`가 있으면 따옴표로 감싸고 `"`는 `""`로 (`\\r`만 있으면 감싸지 않음)."""
+    """`DefaultFieldStringifier.stringify`: empty values (undefined, null, '') become an empty field;
+    quoted if it contains `,` `\\n` or `"`, with `"` → `""` (`\\r` alone is not quoted)."""
     if value is None or (isinstance(value, str) and value == ""):
         return ""
     s = js_string(value)
@@ -131,22 +131,22 @@ def csv_line(record: Sequence[Cell]) -> str:
 
 
 def join_records(lines: Sequence[str]) -> str:
-    """`CsvStringifier.joinRecords`: 마지막 행 뒤에도 구분자."""
+    """`CsvStringifier.joinRecords`: delimiter after the last row too."""
     return RECORD_DELIMITER.join(lines) + RECORD_DELIMITER
 
 
 class CsvFileWriter:
-    """`createArrayCsvWriter({path, header})`가 만드는 `CsvWriter` + `FileWriter`.
+    """`CsvWriter` + `FileWriter` as created by `createArrayCsvWriter({path, header})`.
 
-    - 첫 쓰기는 flag `'w'`(새로 만들거나 덮어씀) + 헤더 행, 이후는 `'a'`(덧붙임).
-    - 쓸 때마다 파일을 열고 닫는다 (`fs.writeFile`). 인코딩 UTF-8, BOM 없음.
-    - header가 비어 있으면 헤더 행을 쓰지 않는다 (cs0: `...this.header.length&&{header}`).
+    - First write uses flag `'w'` (create or overwrite) + header row, later ones `'a'` (append).
+    - The file is opened and closed on every write (`fs.writeFile`). UTF-8, no BOM.
+    - No header row if header is empty (cs0: `...this.header.length&&{header}`).
     """
 
     def __init__(self, path: Union[str, Path], header: Optional[Sequence[Cell]] = None) -> None:
         self.path = Path(path)
         self.header = list(header) if header else None
-        self.append = False   # CsvWriter.append / FileWriter.append (기본값 false)
+        self.append = False   # CsvWriter.append / FileWriter.append (default false)
 
     def header_string(self) -> str:
         if self.append or not self.header:

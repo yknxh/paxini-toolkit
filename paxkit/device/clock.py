@@ -1,8 +1,8 @@
-"""리더가 쓰는 시계. 실제 시계와 테스트용 가상 시계를 같은 인터페이스로 둔다.
+"""Clocks used by the reader. The real clock and a virtual test clock share one interface.
 
-- `now()`: 대기 시간 계산용 단조 시계 (초).
-- `sleep(dt)`: 대기.
-- `wall()`: 수신 시각 기록용 PC 시각 (Unix 초). PXSR `dayjs()`(= `Date.now()`, ms)에 해당.
+- `now()`: monotonic clock for computing waits (s).
+- `sleep(dt)`: wait.
+- `wall()`: PC time for receive timestamps (Unix s). Equivalent to PXSR `dayjs()` (= `Date.now()`, ms).
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import time
 
 
 def _precise_wall_time():
-    """Windows의 `time.time()`은 15.6 ms 단위라 ms 시각을 못 쓴다 → 정밀 시스템 시각을 직접 읽는다."""
+    """On Windows `time.time()` ticks in 15.6 ms steps, too coarse for ms timestamps → read the precise system time directly."""
     if sys.platform != "win32":
         return time.time
     import ctypes
@@ -21,20 +21,20 @@ def _precise_wall_time():
 
     def wall() -> float:
         get(ctypes.byref(ft))
-        return ft.value / 1e7 - 11644473600.0   # 1601-01-01 기준 100 ns → Unix 초
+        return ft.value / 1e7 - 11644473600.0   # 100 ns since 1601-01-01 → Unix s
 
     return wall
 
 
 class RealClock:
-    # Python 3.11+ `time.sleep`은 Windows에서도 고해상도 타이머를 쓴다 (1 ms 대기 ≈ 1.1~1.7 ms 실측).
+    # Python 3.11+ `time.sleep` uses a high-resolution timer on Windows too (1 ms wait ≈ 1.1–1.7 ms measured).
     now = staticmethod(time.perf_counter)
     sleep = staticmethod(time.sleep)
     wall = staticmethod(_precise_wall_time())
 
 
 class VirtualClock:
-    """테스트용. `sleep`이 실제로 기다리지 않고 시각만 앞으로 옮긴다."""
+    """For tests. `sleep` does not actually wait; it only advances the time."""
 
     def __init__(self, wall_base: float = 0.0) -> None:
         self.t = 0.0

@@ -1,8 +1,8 @@
-"""기록 중 커버리지 집계 (계획 P6-1 3): 구역별 안정 샘플 수와 힘 구간 채움.
+"""Coverage tally during recording (plan P6-1 3): stable samples per zone and force-bin fill.
 
-센서 sink(프레임)·게이지 sink(샘플)로 받은 값을 모아 두고, `update()` 때 짝짓기 판정에 필요한 앞뒤 데이터가
-다 모인 게이지 샘플만 사후 분석과 같은 함수(`pair_sensor`)로 분류한다. 그래서 화면 숫자는 분석 결과와 같은 규칙이다
-(분석은 게이지 이상값 제외 등이 더 있어 숫자가 조금 다를 수 있음).
+Values from the sensor sink (frames) and gauge sink (samples) are buffered; on `update()`, only gauge samples whose surrounding
+data needed for pairing has fully arrived are classified with the same function as post-analysis (`pair_sensor`). So the
+on-screen counts follow the same rules as the analysis (the analysis also excludes gauge outliers etc., so counts may differ slightly).
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from .pairing import RAW_TO_N, SensorSeries, pair_sensor
 from .settings import force_bins
 from .zones import NO_ZONE, ZoneSet
 
-KEEP_S = 3.0   # 처리한 뒤에도 남겨 두는 과거 데이터 (기울기 창·보간용)
+KEEP_S = 3.0   # past data kept after processing (for the slope window and interpolation)
 
 
 class Coverage:
@@ -24,8 +24,8 @@ class Coverage:
         self.settings = settings
         nz = len(zones.zones) if zones else 0
         self.bins = force_bins(settings)
-        self.stable = np.zeros(nz, dtype=int)                    # 구역별 안정 샘플 수
-        self.bin_counts = np.zeros((nz, len(self.bins)), dtype=int)  # 구역 × 힘 구간
+        self.stable = np.zeros(nz, dtype=int)                    # stable samples per zone
+        self.bin_counts = np.zeros((nz, len(self.bins)), dtype=int)  # zone × force bin
         self.total_stable = 0
         self.total_contact = 0
         self.no_zone = 0
@@ -37,9 +37,9 @@ class Coverage:
         self._fz: List[tuple] = []
         self._gt: List[float] = []
         self._gv: List[float] = []
-        self._done_t = -np.inf    # 이 시각까지의 게이지 샘플은 처리함
+        self._done_t = -np.inf    # gauge samples up to this time have been processed
 
-    # ── sink (리더 스레드) ──
+    # ── sink (reader thread) ──
     def add_frame(self, frame) -> None:
         z = tuple(np.nan if v is None else v for v in frame.grid[2::3])
         c = tuple(np.nan if v is None else v for v in frame.combine)
@@ -53,13 +53,13 @@ class Coverage:
             self._gt.append(t)
             self._gv.append(v)
 
-    # ── 집계 (GUI 타이머) ──
+    # ── tally (GUI timer) ──
     def enough(self) -> np.ndarray:
-        """구역마다 "충분": 안정 샘플 ≥ zone_min_samples 이고 힘 구간 2개 이상 채움."""
+        """Per zone "enough": stable samples ≥ zone_min_samples and at least 2 force bins filled."""
         return (self.stable >= int(self.settings["zone_min_samples"])) & ((self.bin_counts > 0).sum(axis=1) >= 2)
 
     def update(self) -> int:
-        """처리할 수 있는 게이지 샘플을 분류해 더한다. 새로 처리한 샘플 수를 돌려준다."""
+        """Classifies and adds the gauge samples that can be processed. Returns the number of newly processed samples."""
         s = self.settings
         half, gap = float(s["stable_window_s"]), float(s["max_gap_s"])
         with self._lock:

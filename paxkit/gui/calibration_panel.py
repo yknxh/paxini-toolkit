@@ -1,9 +1,9 @@
-"""캘리브레이션 탭: PXSR 캘리브레이션 버튼(`O3`)과 같은 동작 + 결과·전후 값 표시 (계획 P7).
+"""Calibration tab: same action as the PXSR calibration button (`O3`) + result and before/after values (plan P7).
 
-PXSR 버튼은 연결 전에도 눌리지만, 연결 전에는 보낼 곳이 없고 다음 연결 때 `P1`이 폴링 중지 표시를 지우므로
-센서 쪽 결과는 같다. 여기서는 연결됐을 때만 누를 수 있게 한다 (2026-10-05 사용자 결정).
-중복 클릭은 막는다 (2026-10-05 사용자 결정, PXSR은 막지 않음): 1회가 끝날 때까지(응답 + 후 값 0.5 s, 또는 응답 없음 판정)
-버튼을 잠근다. 한 번 누를 때 센서로 가는 명령은 PXSR 1회 클릭과 같다.
+The PXSR button can be pressed before connecting, but then there is nowhere to send, and on the next connect `P1` clears the polling-stopped flag,
+so the sensor-side result is the same. Here it can be pressed only while connected (2026-10-05 user decision).
+Repeated clicks are blocked (2026-10-05 user decision; PXSR does not block them): the button stays locked until one run finishes
+(reply + 0.5 s of after-values, or a no-reply verdict). The commands sent to the sensor per press are the same as one PXSR click.
 """
 from __future__ import annotations
 
@@ -35,39 +35,39 @@ class CalibrationPanel(QWidget):
         self.runs: List[CalibrationRun] = []
         self.last: Optional[CalibrationResult] = None
 
-        note = QLabel("센서를 누르지 않은 상태에서 실행하세요. PXSR 캘리브레이션 버튼과 같은 명령을 보내고, "
-                      "영점은 센서 펌웨어가 잡습니다 (앱은 값을 보정·저장하지 않음).")
+        note = QLabel("Run with nothing pressing on the sensor. Sends the same command as the PXSR calibration button; "
+                      "the sensor firmware sets the zero (the app does not correct or store values).")
         note.setWordWrap(True)
-        self.cal_btn = QPushButton("캘리브레이션")
+        self.cal_btn = QPushButton("Calibrate")
         self.cal_btn.setEnabled(False)
         self.cal_btn.clicked.connect(self.calibrate)
-        open_btn = QPushButton("기록 파일 열기")
+        open_btn = QPushButton("Open history file")
         open_btn.clicked.connect(self._open_history)
         row = QHBoxLayout()
         row.addWidget(self.cal_btn, 1)
         row.addWidget(open_btn)
 
-        box = QGroupBox("마지막 결과")
+        box = QGroupBox("Last result")
         form = QFormLayout(box)
         self.lbl_outcome = QLabel("-")
         self.lbl_outcome.setWordWrap(True)
         self.lbl_time = QLabel("-")
         self.lbl_delay = QLabel("-")
-        form.addRow("결과", self.lbl_outcome)
-        form.addRow("요청 시각", self.lbl_time)
-        form.addRow("버튼→전송→응답", self.lbl_delay)
+        form.addRow("Result", self.lbl_outcome)
+        form.addRow("Requested at", self.lbl_time)
+        form.addRow("Button→send→reply", self.lbl_delay)
         self.table = QTableWidget(2, 3)
         self.table.setHorizontalHeaderLabels([f"{a} (N)" for a in AXES])
-        self.table.setVerticalHeaderLabels(["전 0.5 s 평균", "후 0.5 s 평균"])
+        self.table.setVerticalHeaderLabels(["Before (0.5 s mean)", "After (0.5 s mean)"])
         self.table.setMaximumHeight(100)
-        form.addRow("합력", self.table)
+        form.addRow("Resultant", self.table)
 
         self.history = QListWidget()
         lay = QVBoxLayout(self)
         lay.addWidget(note)
         lay.addLayout(row)
         lay.addWidget(box)
-        lay.addWidget(QLabel("이번 실행 기록 (data/calibration/history.jsonl에도 저장)"))
+        lay.addWidget(QLabel("Runs this session (also saved to data/calibration/history.jsonl)"))
         lay.addWidget(self.history, 1)
 
         self._timer = QTimer(self)
@@ -81,7 +81,7 @@ class CalibrationPanel(QWidget):
 
     @property
     def busy(self) -> bool:
-        """캘리브레이션 1회가 진행 중 (중복 클릭 잠금)."""
+        """A calibration run is in progress (repeated-click lock)."""
         return bool(self.runs)
 
     def calibrate(self) -> None:
@@ -106,7 +106,7 @@ class CalibrationPanel(QWidget):
     def _update_button(self) -> None:
         s = self.sensor
         self.cal_btn.setEnabled(s is not None and s.status == "connected" and s.is_alive() and not self.busy)
-        self.cal_btn.setText("캘리브레이션 중…" if self.busy else "캘리브레이션")
+        self.cal_btn.setText("Calibrating…" if self.busy else "Calibrate")
 
     def _summary(self, r: CalibrationResult) -> str:
         t = datetime.fromtimestamp(r.requested).strftime("%H:%M:%S")
@@ -116,7 +116,7 @@ class CalibrationPanel(QWidget):
     def _show(self, r: CalibrationResult) -> None:
         self.last = r
         self.lbl_outcome.setText(OUTCOME_TEXT.get(r.outcome, r.outcome)
-                                 + ("" if r.status is None else f" — status {r.status}, 기능 코드 {r.function_code}"))
+                                 + ("" if r.status is None else f" — status {r.status}, function code {r.function_code}"))
         self.lbl_time.setText(datetime.fromtimestamp(r.requested).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3])
         self.lbl_delay.setText(f"{_ms(r.requested, r.sent)} / {_ms(r.sent, r.acked)}")
         for i, v in enumerate((r.before, r.after)):

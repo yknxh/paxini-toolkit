@@ -1,9 +1,9 @@
-"""시뮬레이션 센서: USB 직결 센서처럼 명령에 응답하는 가짜 포트.
+"""Simulated sensor: a fake port that answers commands like a USB direct sensor.
 
-`UsbSensor`에 SerialTransport 대신 넣으면 장비 없이 같은 코드 경로로 GUI·기록을 돌려 볼 수 있다.
-응답 프레임 모양은 실기 캡처(2026-10-04, 펌웨어 v1.0.5)를 따른다. 값은 가짜 누름 프로파일:
-`period`마다 한 번 누르고(올림 20 %, 유지 35 %, 내림 20 %, 쉼 25 %), 누를 때마다 힘(최대값의 100·40·70 %)과
-위치(taxel 하나를 중심으로 한 분포, 센서 점 모델 좌표 기준)가 바뀐다. 게이지 테스트(bench)를 장비 없이 돌려 보기 위한 것.
+Pass it to `UsbSensor` instead of SerialTransport to run the GUI and recording through the same code path without hardware.
+Response frame layout follows a real capture (2026-10-04, firmware v1.0.5). Values follow a fake press profile:
+one press per `period` (rise 20 %, hold 35 %, release 20 %, rest 25 %); each press changes force (100·40·70 % of max) and
+position (distribution centered on one taxel, in sensor point model coordinates). Meant for running the gauge test (bench) without hardware.
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ SIM_VERSIONS = {
 
 
 def _response(sid: int, func: int, addr: int, n: int, body: bytes) -> bytes:
-    """`AA 55 | len | sid 00 | func | addr | n | 01 | body | cs` (캡처한 응답과 같은 배치)."""
+    """`AA 55 | len | sid 00 | func | addr | n | 01 | body | cs` (same layout as the captured response)."""
     f = [0xAA, 0x55, 0, 0, sid, 0, func, *addr.to_bytes(4, "little"), *n.to_bytes(2, "little"), 1, *body]
     f[2:4] = list((len(f) + 1 - 5).to_bytes(2, "little"))
     f.append(codec.checksum(f))
@@ -35,15 +35,15 @@ class SimUsbTransport:
         self.taxels = codec.find_sensor_type(self.version).forces
         self.service_id = service_id
         self.clock = clock or RealClock()
-        self.response_delay = response_delay   # 실측 중앙값 2.3 ms
+        self.response_delay = response_delay   # measured median 2.3 ms
         self.period = period
         self.peak_raw = peak_raw
         self.is_open = False
         self.written: List[Tuple[float, bytes]] = []
         self._pending: List[Tuple[float, bytes]] = []
         self._t0: Optional[float] = None
-        self.zero = 0   # 캘리브레이션을 받으면 현재 값을 영점으로 삼는 흉내
-        self.mute = False   # True면 응답하지 않는다 (수신 멈춤 시험용)
+        self.zero = 0   # mimics taking the current value as zero on calibration
+        self.mute = False   # if True, does not respond (for testing receive stalls)
         self.geometry = load_geometry(sensor)
 
     def open(self) -> None:
@@ -84,13 +84,13 @@ class SimUsbTransport:
         return None
 
     def _cal_ack(self, d: bytes) -> bytes:
-        """캡처한 캘리브레이션 응답은 명령과 같은 모양 (`aa550a00…0100 00 cs`, 상태 0)."""
+        """The captured calibration response has the same shape as the command (`aa550a00…0100 00 cs`, status 0)."""
         f = [0xAA, 0x55, *d[2:13], 0]
         f.append(codec.checksum(f))
         return bytes(f)
 
     LEVELS = (1.0, 0.4, 0.7)
-    SPREAD_MM = 2.5   # 누른 자리 둘레로 taxel 값이 퍼지는 정도
+    SPREAD_MM = 2.5   # how far taxel values spread around the pressed spot
 
     def _phase(self):
         t = self.clock.now() - (self._t0 or 0.0)
@@ -98,7 +98,7 @@ class SimUsbTransport:
         return int(k), u
 
     def _press(self) -> float:
-        """지금 하중 (raw). 한 주기: 올림 0~0.2, 유지 ~0.55, 내림 ~0.75, 쉼."""
+        """Current load (raw). One cycle: rise 0–0.2, hold to 0.55, release to 0.75, rest."""
         k, u = self._phase()
         if u < 0.2:
             a = u / 0.2
@@ -111,12 +111,12 @@ class SimUsbTransport:
         return a * self.LEVELS[k % len(self.LEVELS)] * self.peak_raw
 
     def _center(self) -> int:
-        """이번 누름의 중심 taxel (누를 때마다 센서 위를 고르게 옮겨 다닌다)."""
+        """Center taxel of this press (moves evenly over the sensor with each press)."""
         k, _ = self._phase()
         return (k * 7) % self.taxels
 
     def load_N(self, _t_wall: float = 0.0) -> float:
-        """지금 누르는 실제 하중 (N, 캘리브레이션 영점과 무관). 시뮬레이션 게이지(`SimGauge.load`)용."""
+        """Actual load being applied now (N, independent of calibration zero). For the simulated gauge (`SimGauge.load`)."""
         return self._press() / 10.0 if self.is_open else 0.0
 
     def _payload(self, n: int) -> bytes:
@@ -132,7 +132,7 @@ class SimUsbTransport:
         else:
             nx, ny, nz = 0.05, -0.03, 1.0
             w = [math.exp(-((i - self.taxels / 2) ** 2) / (self.taxels / 3)) for i in range(self.taxels)]
-        # 합력: 누른 면의 법선 방향 (크기 ≈ 하중)
+        # resultant force: along the pressed face normal (magnitude ≈ load)
         p[0] = int(z * nx) & 0xFF                 # X (int8)
         p[1] = int(z * ny) & 0xFF                 # Y (int8)
         p[2] = min(int(z * nz), 255)              # Z (uint8)

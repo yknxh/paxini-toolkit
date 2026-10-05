@@ -1,7 +1,7 @@
-"""게이지 테스트 (bench, 계획 P6): 연속 누름 방식. PXSR 재구현이 아니므로 바이트 동일성 원칙과 무관하다.
+"""Gauge test (bench, plan P6): continuous-press method. Not a PXSR reimplementation, so the byte-identity rule does not apply.
 
-센서 기록은 일반 로깅과 같은 `CsvRecorder`(PXSR 형식 그대로)이고, 센서 값에는 어떤 보정도 하지 않는다.
-합격/불합격 판정 없이 수치·그래프만 낸다.
+Sensor recording uses the same `CsvRecorder` as regular logging (PXSR format as-is), and no correction is applied to sensor values.
+Produces numbers and plots only, with no pass/fail judgment.
 """
 from .analyze import BenchResult, analyze_session, load_result
 from .coverage import Coverage

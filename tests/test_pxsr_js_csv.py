@@ -1,8 +1,8 @@
-"""PXSR이 쓰는 `csv-writer`(설치본 node_modules)와 파일명 함수 `rs0`(번들)를 직접 돌려
-Python 이식본(`paxkit.recording.pxsr_csv`)과 결과 파일 바이트를 비교한다.
+"""Run PXSR's own `csv-writer` (installed node_modules) and file name function `rs0` (bundle) directly
+and compare output file bytes with the Python port (`paxkit.recording.pxsr_csv`).
 
-실제 PXSR CSV에는 정수와 시각 문자열만 나오지만, 여기서는 따옴표·쉼표·줄바꿈·빈 값·undefined·한글 등
-이상한 값까지 넣어 csv-writer 자체를 기준으로 삼는다. PXSR이 설치된 PC에서만 실행되고, 없으면 건너뛴다.
+Real PXSR CSVs contain only ints and time strings, but here odd values (quotes, commas, newlines, empty values,
+undefined, non-ASCII, etc.) are fed in so csv-writer itself is the reference. Runs only on a PC with PXSR installed, skipped otherwise.
 """
 import random
 import sys
@@ -16,9 +16,9 @@ import pxsr_js  # noqa: E402
 
 from paxkit.recording import pxsr_csv  # noqa: E402
 
-pytestmark = pytest.mark.skipif(not pxsr_js.available(), reason="PXSR이 설치되어 있지 않음")
+pytestmark = pytest.mark.skipif(not pxsr_js.available(), reason="PXSR is not installed")
 
-UNDEFINED = {"u": 1}   # JSON에 undefined가 없어 표시로 넘긴다
+UNDEFINED = {"u": 1}   # JSON has no undefined, so pass a marker
 
 HARNESS = r"""
 const path = require('path');
@@ -50,7 +50,7 @@ def _value(rng):
         return None
     if k == 4:
         return UNDEFINED
-    return "".join(rng.choice(['a', '1', ',', '"', '\n', '\r', ' ', '-', ':', '한', '😀', '.'])
+    return "".join(rng.choice(['a', '1', ',', '"', '\n', '\r', ' ', '-', ':', '€', '😀', '.'])
                    for _ in range(rng.randint(0, 6)))
 
 

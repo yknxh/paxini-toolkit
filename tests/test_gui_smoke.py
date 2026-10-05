@@ -21,7 +21,7 @@ def test_main_window_opens():
 
 
 def test_sim_connect_and_disconnect():
-    """시뮬레이션 센서로 연결 → 그래프 갱신 → 해제가 GUI에서 동작한다."""
+    """Simulated sensor: connect → plot updates → disconnect works in the GUI."""
     import time
 
     from PySide6.QtWidgets import QApplication
@@ -32,7 +32,7 @@ def test_sim_connect_and_disconnect():
     app = QApplication.instance() or QApplication([])
     w = MainWindow(Config.load())
     d = w.device
-    d.port_combo.setCurrentIndex(d.port_combo.findData("시뮬레이션: S2015"))
+    d.port_combo.setCurrentIndex(d.port_combo.findData("Simulated: S2015"))
     d.connect_sensor()
     sensor = d.sensor
     end = time.time() + 1.5
@@ -41,6 +41,17 @@ def test_sim_connect_and_disconnect():
         time.sleep(0.01)
     assert sensor.sensor_type.label == "S2015" and sensor.frame_count > 10
     assert w.live.values.text() != "-"
+    texts = [d.events.item(i).text() for i in range(d.events.count())]
+    assert any("Port opened" in t for t in texts) and any("Version reply" in t for t in texts)
+    # heatmap (optional): level computation + painting
+    m = w.live.map
+    assert m.set_model("S2015")
+    z = [0] * 52
+    z[10] = 30
+    m.show_values(z)
+    assert m.levels[10] == 63 and m.levels.sum() == 63
+    m.resize(200, 260)
+    assert not m.grab().isNull()
     d.disconnect_sensor()
     sensor.join(3)
     app.processEvents()
@@ -50,7 +61,7 @@ def test_sim_connect_and_disconnect():
 
 
 def test_sim_recording(tmp_path):
-    """시뮬레이션 센서로 기록 시작 → 정지, 그리고 기록 중 연결 해제 시 기록이 멈춘다."""
+    """Simulated sensor: start → stop recording, and recording stops when disconnecting mid-recording."""
     import json
     import time
 
@@ -69,12 +80,12 @@ def test_sim_recording(tmp_path):
     w = MainWindow(Config.load())
     d, r = w.device, w.recording
     r.directory = tmp_path
-    d.port_combo.setCurrentIndex(d.port_combo.findData("시뮬레이션: S1813E"))
+    d.port_combo.setCurrentIndex(d.port_combo.findData("Simulated: S1813E"))
     d.connect_sensor()
     pump(1.5)
     assert r.start_btn.isEnabled()
     r.start_btn.click()
-    r.memo.setText("테스트 메모")
+    r.memo.setText("test memo")
     pump(0.6)
     r.start_btn.click()
     rec = r.recorder
@@ -82,9 +93,9 @@ def test_sim_recording(tmp_path):
     lines = rec.path.read_bytes().split(b"\n")
     assert lines[0].startswith(b"Timestamp,0-2-1x1-X") and len(lines) == rec.line_count + 2
     side = json.loads(rec.path.with_suffix(".json").read_text(encoding="utf-8"))
-    assert side["memo"] == "테스트 메모" and side["simulated"] and side["rows"] == rec.line_count
+    assert side["memo"] == "test memo" and side["simulated"] and side["rows"] == rec.line_count
 
-    time.sleep(1.1)   # 파일명이 초 단위라 같은 초에 다시 시작하면 덮어쓴다 (PXSR과 같음)
+    time.sleep(1.1)   # file names have 1 s resolution, so restarting within the same second overwrites (same as PXSR)
     r.start_btn.click()
     pump(0.3)
     rec2 = r.recorder
@@ -92,7 +103,7 @@ def test_sim_recording(tmp_path):
     sensor = d.sensor
     d.disconnect_sensor()
     pump(0.1)
-    assert not rec2.active   # 해제 시작과 함께 기록 정지
+    assert not rec2.active   # recording stops as soon as disconnect starts
     sensor.join(3)
     pump(0.3)
     assert rec2.path.exists() and rec2.path != rec.path
@@ -101,7 +112,7 @@ def test_sim_recording(tmp_path):
 
 
 def test_sim_calibration_tab(tmp_path):
-    """캘리브레이션 탭: 시뮬레이션 센서로 실행 → 결과·실행 기록, 기록 중이면 사이드카 events에 남는다."""
+    """Calibration tab: run with a simulated sensor → result and run history; logged to sidecar events while recording."""
     import json
     import time
 
@@ -124,15 +135,15 @@ def test_sim_calibration_tab(tmp_path):
     r.directory = tmp_path
     c.history_file = tmp_path / "history.jsonl"
     assert not c.cal_btn.isEnabled()
-    d.port_combo.setCurrentIndex(d.port_combo.findData("시뮬레이션: S1813E"))
+    d.port_combo.setCurrentIndex(d.port_combo.findData("Simulated: S1813E"))
     d.connect_sensor()
     pump(1.0)
     assert c.cal_btn.isEnabled()
     r.start_btn.click()
     pump(0.3)
     c.cal_btn.click()
-    assert c.busy and not c.cal_btn.isEnabled() and not w.bench.cal_btn.isEnabled() is False or True
-    c.calibrate()   # 진행 중 두 번째 클릭은 무시 (중복 클릭 잠금)
+    assert c.busy and not c.cal_btn.isEnabled()
+    c.calibrate()   # a second click while running is ignored (repeated-click lock)
     w.bench.calibrate_requested.emit()
     assert len(c.runs) == 1
     pump(1.5)
@@ -141,7 +152,7 @@ def test_sim_calibration_tab(tmp_path):
     sent = [x for _, x in d.sensor.transport.written if x == codec.usb_set_calibration(3)]
     assert len(sent) == 1
     rows = read_history(c.history_file)
-    assert len(rows) == 1 and rows[0]["info"]["port"] == "시뮬레이션: S1813E" and rows[0]["info"]["simulated"]
+    assert len(rows) == 1 and rows[0]["info"]["port"] == "Simulated: S1813E" and rows[0]["info"]["simulated"]
     r.start_btn.click()
     side = json.loads(r.recorder.path.with_suffix(".json").read_text(encoding="utf-8"))
     ev = [e for e in side["events"] if e["kind"] == "calibration"]
@@ -155,7 +166,7 @@ def test_sim_calibration_tab(tmp_path):
 
 
 def test_sim_gauge_overlay():
-    """게이지 패널: 시뮬레이션 게이지 + 시뮬레이션 센서 → 라이브 그래프에 겹쳐 그리고 지연을 표시한다."""
+    """Gauge panel: simulated gauge + simulated sensor → overlaid on the live plot, with lag shown."""
     import time
 
     from PySide6.QtWidgets import QApplication
@@ -175,20 +186,20 @@ def test_sim_gauge_overlay():
     d, g = w.device, w.gauge
     g.port_combo.setCurrentIndex(g.port_combo.findData(SIM_GAUGE))
     g.connect_btn.click()
-    d.port_combo.setCurrentIndex(d.port_combo.findData("시뮬레이션: S1813E"))
+    d.port_combo.setCurrentIndex(d.port_combo.findData("Simulated: S1813E"))
     d.connect_sensor()
     gauge, sensor = g.gauge, d.sensor
-    assert gauge.load == sensor.transport.load_N   # 같은 하중을 읽는다
+    assert gauge.load == sensor.transport.load_N   # both read the same load
     pump(4.5)
     x, y = w.live.gauge_curve.getData()
     assert x is not None and len(x) > 20 and max(y) > 5
-    assert len(x) % 2 == 0 and abs(x[-1]) < 0.1 and (y[0::2] == y[1::2]).all()   # 계단: 값마다 두 점, 끝은 지금
-    assert g.lbl_value.text().endswith(" N") and "게이지" in w.live.gauge_value.text()
+    assert len(x) % 2 == 0 and abs(x[-1]) < 0.1 and (y[0::2] == y[1::2]).all()   # steps: two points per value, ending at now
+    assert g.lbl_value.text().endswith(" N") and "Gauge" in w.live.gauge_value.text()
     assert w.live.lag_value is not None and abs(w.live.lag_value) < 0.06
     d.disconnect_sensor()
     sensor.join(3)
     pump(0.3)
-    assert gauge.load is None   # 센서 해제 → 게이지는 자체 하중으로
+    assert gauge.load is None   # sensor disconnected → gauge falls back to its own load
     g.connect_btn.click()
     assert g.gauge is None and not gauge.is_alive()
     x, _ = w.live.gauge_curve.getData()
@@ -197,7 +208,7 @@ def test_sim_gauge_overlay():
 
 
 def test_sim_bench_tab_record_analyze_results(tmp_path):
-    """테스트 탭: 시뮬레이션 센서 + 게이지 → 무부하 확인 → 캘리브레이션 → 기록 → 정지 → 자동 분석 → 결과 탭."""
+    """Test tab: simulated sensor + gauge → no-load check → calibration → record → stop → auto analysis → Results tab."""
     import json
     import time
 
@@ -226,9 +237,9 @@ def test_sim_bench_tab_record_analyze_results(tmp_path):
     assert not b.start_btn.isEnabled()
     g.port_combo.setCurrentIndex(g.port_combo.findData(SIM_GAUGE))
     g.connect_btn.click()
-    d.port_combo.setCurrentIndex(d.port_combo.findData("시뮬레이션: S1813E"))
+    d.port_combo.setCurrentIndex(d.port_combo.findData("Simulated: S1813E"))
     d.connect_sensor()
-    d.sensor.transport.period = 1.5   # 짧은 시간에 여러 위치를 누르게
+    d.sensor.transport.period = 1.5   # press several spots within a short time
     assert pump(3.0, lambda: b.ready())
     b.label_edit.setText("A1")
     pump(0.3)
@@ -240,7 +251,7 @@ def test_sim_bench_tab_record_analyze_results(tmp_path):
     b.start_btn.click()
     assert b.recording and not b.label_edit.isEnabled()
     pump(9.0)
-    assert b.coverage.total_stable > 0 and "기록 중" in b.lbl_rec.text()
+    assert b.coverage.total_stable > 0 and "Recording" in b.lbl_rec.text()
     folder = b.session.folder
     b.stop_btn.click()
     assert pump(30.0, lambda: res.result is not None)
@@ -249,11 +260,11 @@ def test_sim_bench_tab_record_analyze_results(tmp_path):
     meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
     assert [e["kind"] for e in meta["events"]] == ["noload_check", "calibration"] and meta["status"] == "stopped"
     assert (folder / "report.html").is_file() and res.sessions.count() == 1
-    # 재분석 버튼 (같은 결과 파일을 덮어씀)
+    # re-analyze button (overwrites the same result files)
     res.result = None
     res.reanalyze_btn.click()
     assert pump(30.0, lambda: res.result is not None)
-    # 취소: 기록 파일만 남고 분석하지 않음
+    # cancel: only the recorded files remain, no analysis
     time.sleep(1.1)
     b.start_btn.click()
     pump(1.0)
@@ -261,6 +272,18 @@ def test_sim_bench_tab_record_analyze_results(tmp_path):
     pump(0.5)
     assert res.sessions.count() == 2 and not (b.session.folder / "result.json").exists()
     assert json.loads((b.session.folder / "meta.json").read_text(encoding="utf-8"))["status"] == "cancelled"
+    # a new label or a new sensor connection clears the previous test's coverage / preparation events
+    from paxkit.gui.bench_panel import COVERAGE_IDLE, NOLOAD_IDLE
+    b.label_edit.setText("A2")
+    assert b.session is None and b.lbl_cov.text() == COVERAGE_IDLE and b.lbl_rec.text() == "-"
+    b.noload_btn.click()
+    assert pump(2.0, lambda: bool(b.pending_events))
+    old = d.sensor
+    d.disconnect_sensor()
+    old.join(3)
+    d.connect_sensor()
+    assert pump(3.0, lambda: b.ready())
+    assert b.pending_events == [] and b.lbl_noload.text() == NOLOAD_IDLE and b.label_edit.text() == "A2"
     sensor = d.sensor
     d.disconnect_sensor()
     sensor.join(3)
@@ -270,7 +293,7 @@ def test_sim_bench_tab_record_analyze_results(tmp_path):
 
 
 def test_sim_stall_notifies_and_stops_recordings(tmp_path):
-    """센서 수신 멈춤: 알림 창 + 데이터 로깅·게이지 테스트 기록이 멈춘 시점까지 저장하고 정지 (게이지 테스트는 분석)."""
+    """Sensor data stall: notice box + data logging and gauge-test recordings saved up to the stall and stopped (gauge test is analyzed)."""
     import json
     import time
 
@@ -296,7 +319,7 @@ def test_sim_stall_notifies_and_stops_recordings(tmp_path):
     b.root = res.root = tmp_path / "bench"
     g.port_combo.setCurrentIndex(g.port_combo.findData(SIM_GAUGE))
     g.connect_btn.click()
-    d.port_combo.setCurrentIndex(d.port_combo.findData("시뮬레이션: S2015"))
+    d.port_combo.setCurrentIndex(d.port_combo.findData("Simulated: S2015"))
     d.connect_sensor()
     assert pump(3.0, lambda: b.ready())
     r.start_btn.click()
@@ -306,9 +329,9 @@ def test_sim_stall_notifies_and_stops_recordings(tmp_path):
     pump(1.5)
     d.sensor.transport.mute = True
     assert pump(3.0, lambda: w.notice is not None)
-    assert w.notice.windowTitle() == "센서 수신 멈춤" and "멈춘 시점까지 저장" in w.notice.text()
+    assert w.notice.windowTitle() == "Sensor data stalled" and "saved up to the stall" in w.notice.text()
     rec = r.recorder
-    assert not rec.active and rec.path.name in w.notice.text() and "수신 멈춤" in r.lbl_file.text()
+    assert not rec.active and rec.path.name in w.notice.text() and "Data stalled" in r.lbl_file.text()
     side = json.loads(rec.path.with_suffix(".json").read_text(encoding="utf-8"))
     assert [e["kind"] for e in side["events"]] == ["stalled"]
     folder = b.session.folder
@@ -317,7 +340,7 @@ def test_sim_stall_notifies_and_stops_recordings(tmp_path):
     assert meta["status"] == "stopped" and meta["events"][-1]["kind"] == "sensor_stalled"
     assert pump(30.0, lambda: res.result is not None and res.result.folder == folder)
     pump(0.3)
-    assert "수신 멈춤" in d.lbl_status.text()
+    assert "Data stalled" in d.lbl_status.text()
     sensor = d.sensor
     d.disconnect_sensor()
     sensor.join(3)

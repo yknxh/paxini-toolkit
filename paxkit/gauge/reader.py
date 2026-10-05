@@ -1,20 +1,20 @@
-"""Force gauge 리더 (paxtest `devices/gauge.py`에서 이전, 계획 P5).
+"""Force gauge reader (ported from paxtest `devices/gauge.py`, plan P5).
 
-실장비(SerialGauge)는 config.yaml 의 gauge 섹션을 따른다.
-poll/stream 두 방식과 정규식 파싱으로 일반화했다.
-실측(COM7, FTDI): 2400 baud 8N1, 명령 없이 약 10 Hz 로 고정폭 6글자("0000.2", "-004.9")를 구분자 없이 연속 송신.
-명령(D 등)은 무시하고 송신 속도도 바뀌지 않는다.
-→ mode: stream, line_terminator: "" 이면 record_regex 로 레코드를 잘라 읽는다.
+The real device (SerialGauge) follows the gauge section of config.yaml.
+Generalized to poll/stream modes and regex parsing.
+Measured (COM7, FTDI): 2400 baud 8N1, sends fixed-width 6-character records ("0000.2", "-004.9") continuously at ~10 Hz without a command or delimiter.
+Commands (D, etc.) are ignored and do not change the send rate.
+→ with mode: stream, line_terminator: "", records are cut out with record_regex.
 
-paxtest와 다른 점 (게이지는 PXSR 대체 대상이 아니므로 바이트 동일성 원칙과 무관):
-- 수신 시각을 센서 리더와 같은 시계(`clock.wall()`)로 찍는다. Windows `time.time()`은 15.6 ms 단위라
-  센서(정밀 시각)와 섞으면 시각이 어긋난다.
-- 지연 보정 (2026-10-05 사용자 요청 "게이지 지연은 최대한 고쳐줘"). 실측 지연(센서−게이지) −50 ms를 둘로 나눠 뺀다:
-  1. stream 레코드 시각 = 레코드 **첫 바이트** 도착 시각 (paxtest는 마지막 바이트). 값은 송신 시작 전에 정해지므로
-     레코드 전송 시간(6바이트 × 10/2400 s = 25 ms)만큼 앞당긴다. baud·글자 수에서 계산되는 값.
-  2. 나머지 고정 지연 `latency_s` (config, 게이지 내부 측정→송신 + FTDI 버퍼 latency timer). 실측에서 1을 뺀 값.
-- 시리얼 포트를 여는 함수(`open_serial`)를 바꿀 수 있게 했다 (장비 없이 테스트).
-- SimGauge는 paxtest SimWorld 대신 하중 함수(`load`)를 받는다. 시뮬레이션 센서와 같은 하중을 주면 겹쳐 볼 수 있다.
+Differences from paxtest (the gauge is not a PXSR replacement target, so the byte-identity rule does not apply):
+- Receive times are stamped with the same clock as the sensor reader (`clock.wall()`). Windows `time.time()` has 15.6 ms
+  resolution, so mixing it with the sensor (precise time) misaligns timestamps.
+- Lag correction (2026-10-05 user request "fix the gauge lag as much as possible"). The measured lag (sensor−gauge) of −50 ms is subtracted in two parts:
+  1. stream record time = arrival time of the record's **first byte** (paxtest: last byte). The value is fixed before sending
+     starts, so it is moved earlier by the record transmission time (6 bytes × 10/2400 s = 25 ms), computed from baud and length.
+  2. The remaining fixed latency `latency_s` (config; gauge internal measure→send + FTDI buffer latency timer). Measured lag minus 1.
+- The serial-port open function (`open_serial`) is replaceable (testing without hardware).
+- SimGauge takes a load function (`load`) instead of paxtest SimWorld. Giving it the same load as the simulated sensor lets them be overlaid.
 """
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ class GaugeBase(threading.Thread):
         self._sink_lock = threading.Lock()
         self._stop_evt = threading.Event()
 
-    # ── sinks (세션 기록기가 붙는다) ──
+    # ── sinks (the session recorder attaches here) ──
     def add_sink(self, fn: Sink) -> None:
         with self._sink_lock:
             self._sinks.append(fn)
@@ -67,7 +67,7 @@ class GaugeBase(threading.Thread):
             for fn in self._sinks:
                 try:
                     fn(t, value)
-                except Exception:  # 기록 실패가 읽기 루프를 죽이지 않도록
+                except Exception:  # so a recording failure doesn't kill the read loop
                     log.exception("gauge sink failed")
 
     def latest(self) -> Optional[float]:
@@ -75,7 +75,7 @@ class GaugeBase(threading.Thread):
         return None if v is None else float(v[0])
 
     def receiving(self, window: float = 2.0) -> bool:
-        """연결됐고 최근 window 초 안에 값이 왔는가 (paxtest `hub.gauge_receiving`)."""
+        """Connected and a value arrived within the last window seconds (paxtest `hub.gauge_receiving`)."""
         t, _ = self.buffer.latest()
         return self.status == "connected" and t is not None and self.clock.wall() - t < window
 
@@ -90,19 +90,19 @@ class SerialGauge(GaugeBase):
         self.open_serial = open_serial or _open_serial
         self.regex = re.compile(cfg.get("line_regex", r"([-+]?\d+(?:\.\d+)?)"))
         self.scale = float(cfg.get("unit_scale", 1.0)) * (-1.0 if cfg.get("invert") else 1.0)
-        # 구분자 없이 값이 이어 붙어 오는 stream (예: "0000.0-000.3-004.9...") 용
+        # for streams where values arrive concatenated without a delimiter (e.g. "0000.0-000.3-004.9...")
         self.record_regex = re.compile(cfg.get("record_regex", r"[-+ \d]\d{3}\.\d").encode())
         self.record_len = int(cfg.get("record_len", 6))
-        self.latency = float(cfg.get("latency_s", 0.0))   # 수신 시각에서 뺄 고정 지연 (s)
+        self.latency = float(cfg.get("latency_s", 0.0))   # fixed latency subtracted from the receive time (s)
 
     @property
     def port(self) -> str:
         return str(self.cfg.get("port", "COM3"))
 
     def _split_records(self, buf: bytes) -> tuple[list[tuple[int, float]], bytes]:
-        """buf 에서 완성된 레코드를 (끝 위치, 값) 으로 꺼내고 남은 꼬리를 돌려준다.
+        """Extracts completed records from buf as (end position, value) and returns the remaining tail.
 
-        버퍼 끝에 걸친 레코드는 record_len 에 도달했을 때만 완성으로 본다 ("-00.7" 이 "-00.73" 의 앞부분일 수 있음).
+        A record at the end of the buffer counts as complete only once it reaches record_len ("-00.7" may be the start of "-00.73").
         """
         out: list[tuple[int, float]] = []
         rest = 0
@@ -115,7 +115,7 @@ class SerialGauge(GaugeBase):
                 out.append((m.end(), value))
             rest = m.end()
         else:
-            rest = max(rest, len(buf) - self.record_len)   # 매칭 안 되는 잡음은 버리되 쓰다 만 레코드는 남긴다
+            rest = max(rest, len(buf) - self.record_len)   # drop unmatched noise but keep a partially received record
         return out, buf[rest:]
 
     def _parse(self, raw: bytes) -> Optional[float]:
@@ -137,10 +137,10 @@ class SerialGauge(GaugeBase):
         cmd = str(cfg.get("poll_command", "D\r")).encode()
         period = 1.0 / float(cfg.get("poll_hz", 50))
         baud = int(cfg.get("baudrate", 19200))
-        byte_s = 10.0 / baud   # 8N1 한 바이트 전송 시간
+        byte_s = 10.0 / baud   # transmission time of one byte at 8N1
         timeout = float(cfg.get("timeout_s", 0.2))
         wall = self.clock.wall
-        rec_s = self.record_len * byte_s   # 레코드 한 개 전송 시간
+        rec_s = self.record_len * byte_s   # transmission time of one record
         lat = self.latency
         while not self._stop_evt.is_set():
             try:
@@ -158,8 +158,8 @@ class SerialGauge(GaugeBase):
                         total_len = len(buf)
                         records, buf = self._split_records(buf)
                         for end, value in records:
-                            # 한 번에 여러 레코드가 읽히면 뒤에 남은 바이트 수만큼 도착 시각을 앞당기고 (paxtest),
-                            # 레코드 전송 시간만큼 더 앞당겨 첫 바이트 시각으로 둔다. 고정 지연도 뺀다.
+                            # when several records are read at once, move arrival times earlier by the bytes that follow each one (paxtest),
+                            # then earlier by the record transmission time to get the first-byte time. The fixed latency is subtracted too.
                             self._emit(t1 - (total_len - end) * byte_s - rec_s - lat, value)
                     while not self._stop_evt.is_set():
                         t0 = wall()
@@ -169,26 +169,26 @@ class SerialGauge(GaugeBase):
                         t1 = wall()
                         value = self._parse(raw)
                         if value is not None:
-                            # poll 방식은 요청-응답 중간 시점을 샘플 시각으로 본다
+                            # poll mode takes the midpoint of request and response as the sample time
                             self._emit(((t0 + t1) / 2 if mode == "poll" else t1) - lat, value)
                         if mode == "poll":
                             rest = period - (wall() - t0)
                             if rest > 0:
                                 self._stop_evt.wait(rest)
             except ImportError:
-                self.status, self.error = "error", "pyserial 미설치"
+                self.status, self.error = "error", "pyserial not installed"
                 return
-            except Exception as e:  # 포트 없음/끊김 → 2초 후 재시도
+            except Exception as e:  # no port/disconnected → retry after 2 s
                 self.status, self.error = "error", str(e)
                 self._stop_evt.wait(2.0)
         self.status = "disconnected"
 
 
 class SimGauge(GaugeBase):
-    """하중 함수 `load(t_wall) → N`을 rate_hz, 0.1 N 분해능으로 읽는다 (paxtest SimGauge).
+    """Reads the load function `load(t_wall) → N` at rate_hz with 0.1 N resolution (paxtest SimGauge).
 
-    load가 없으면 시뮬레이션 센서와 같은 모양(주기 4 s, 최고 12 N 반파 사인)을 자기 시작 시각부터 만든다.
-    `load`는 실행 중에 바꿀 수 있다 (GUI가 시뮬레이션 센서와 연결/해제).
+    Without load, generates the same shape as the simulated sensor (period 4 s, 12 N peak half-wave sine) from its own start time.
+    `load` can be changed while running (the GUI links/unlinks it with the simulated sensor).
     """
 
     def __init__(self, load: Optional[Callable[[float], float]] = None, *, noise_N: float = 0.05,
@@ -205,7 +205,7 @@ class SimGauge(GaugeBase):
 
     @property
     def port(self) -> str:
-        return "시뮬레이션"
+        return "simulation"
 
     def _default_load(self, t: float) -> float:
         return max(0.0, math.sin(2 * math.pi * (t - (self._t0 or t)) / self.profile_period)) * self.peak_N

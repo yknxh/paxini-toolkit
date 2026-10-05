@@ -11,7 +11,7 @@ def test_data_dir_inside_repo():
 
 
 def test_data_dir_independent_of_cwd(tmp_path):
-    # 다른 디렉토리에서 실행해도 data/ 는 레포 안을 가리켜야 한다
+    # data/ must point inside the repo even when run from another directory
     out = subprocess.run(
         [sys.executable, "-c", "from paxkit import paths; print(paths.data_path('logs', create=False))"],
         cwd=tmp_path, capture_output=True, text=True, check=True,

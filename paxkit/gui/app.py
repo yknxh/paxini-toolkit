@@ -12,8 +12,8 @@ from .main_window import MainWindow
 
 
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Paxini Gen3 도구 (PXSR 대체 + force gauge 테스트)")
-    ap.add_argument("--config", help="config.yaml 경로 (기본: 레포 루트)")
+    ap = argparse.ArgumentParser(description="Paxini Gen3 toolkit (PXSR replacement + force gauge test)")
+    ap.add_argument("--config", help="path to config.yaml (default: repo root)")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = Config.load(a.config)

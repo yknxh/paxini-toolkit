@@ -1,11 +1,11 @@
-"""테스트 탭 (계획 P6-1, P7): 준비 → 무부하 확인·캘리브레이션 → 기록 → 정지(자동 분석)/취소.
+"""Test tab (plan P6-1, P7): prepare → no-load check/calibration → record → stop (auto analysis)/cancel.
 
-- 센서·게이지 둘 다 값을 받고 있어야 기록을 시작할 수 있다.
-- 무부하 확인은 기록만 한다 (meta.json 이벤트, 값 보정 없음). 캘리브레이션은 캘리브레이션 탭과 같은 동작
-  (`CalibrationRun`, history.jsonl)이고 결과를 세션 이벤트에도 남긴다.
-- 기록 중 화면: 게이지·센서 |F| 겹친 그래프, 현재 힘 막대(max_N 선, 넘으면 빨강), 커버리지 지도, 경과 시간·샘플 수.
-- 정지하면 별도 스레드에서 분석해 `analyzed` 신호로 결과를 넘긴다. 취소는 기록 파일만 남긴다 (나중에 재분석 가능).
-HAND(센서 4개, "다음 센서")는 HAND 리더(P1b) 이후에 붙인다.
+- Recording can start only while both sensor and gauge are delivering values.
+- The no-load check is only logged (meta.json event, no value correction). Calibration is the same action as the Calibration tab
+  (`CalibrationRun`, history.jsonl), and its result is also logged as a session event.
+- Recording view: gauge and sensor |F| overlaid plot, current force bar (max_N line, red above it), coverage map, elapsed time and sample counts.
+- On stop, analysis runs in a separate thread and the result is passed via the `analyzed` signal. Cancel keeps only the recorded files (can be re-analyzed later).
+HAND (4 sensors, "next sensor") will be added after the HAND reader (P1b).
 """
 from __future__ import annotations
 
@@ -22,13 +22,14 @@ from PySide6.QtWidgets import (QFormLayout, QGridLayout, QGroupBox, QHBoxLayout,
 from ..bench import BenchSession, Coverage, analyze_session, load_zones, noload_check
 from ..device.clock import RealClock
 from . import theme
+from .light_grid import LightGrid
 from .live_view import step_xy
 from .sensor_map import SensorMap
 
 WINDOW_S = 10.0
-GUIDE = ("센서 표면의 여러 위치를 0~{max:g} N 사이의 힘으로 누르세요. 누른 채로 1초쯤 멈췄다가 힘을 천천히 바꾸고, "
-         "위치를 옮겨 가며 반복하세요. 게이지 팁은 누르는 면에 수직으로 대세요. {max:g} N을 넘기지 마세요. "
-         "권장 시간 3~5분, 지도의 모든 구역이 \"충분\"(초록)이 될 때까지.")
+GUIDE = ("Press various spots on the sensor surface with forces of 0–{max:g} N. Hold each press for about 1 s, then change the force slowly, "
+         "and repeat while moving to new spots. Keep the gauge tip perpendicular to the pressed surface. Do not exceed {max:g} N. "
+         "Recommended 3–5 min, until every zone on the map is \"enough\" (green).")
 
 
 def _receiving(dev, window: float = 1.0) -> bool:
@@ -37,12 +38,15 @@ def _receiving(dev, window: float = 1.0) -> bool:
     t, _ = dev.buffer.latest()
     return t is not None and dev.clock.wall() - t < window
 
+NOLOAD_IDLE = "Not done yet (logged only; not used to correct values)"
+COVERAGE_IDLE = "Coverage: shown once recording starts"
+
 
 class BenchPanel(QWidget):
     analyzed = Signal(object)        # BenchResult
     analysis_failed = Signal(str)
     calibrate_requested = Signal()
-    session_saved = Signal(object)   # 세션 폴더 (분석 전)
+    session_saved = Signal(object)   # session folder (before analysis)
 
     def __init__(self, settings: Dict[str, Any], gauge_config: Optional[Dict[str, Any]] = None) -> None:
         super().__init__()
@@ -55,51 +59,52 @@ class BenchPanel(QWidget):
         self.session: Optional[BenchSession] = None
         self.coverage: Optional[Coverage] = None
         self.clock = RealClock()
-        self.pending_events: List[Dict[str, Any]] = []   # 준비 단계 이벤트 (기록 시작 때 세션에 넣음)
-        self.calibration_busy = lambda: False   # 메인 창이 캘리브레이션 탭의 진행 중 여부로 바꾼다 (중복 클릭 잠금)
+        self.pending_events: List[Dict[str, Any]] = []   # preparation events (added to the session when recording starts)
+        self.calibration_busy = lambda: False   # the main window replaces this with the Calibration tab's busy state (repeated-click lock)
         self._noload_t0: Optional[float] = None
+        self._last_sensor = None   # last connected reader (a different one = new connection)
         self.analyzing = False
-        self.root = None   # 테스트에서 저장 위치 바꾸기용 (None = data/bench)
+        self.root = None   # lets tests change the save location (None = data/bench)
 
-        # ── 준비 ──
-        prep = QGroupBox("1. 준비")
+        # ── preparation ──
+        prep = QGroupBox("1. Prepare")
         pf = QFormLayout(prep)
         self.lbl_sensor = QLabel("-")
         self.lbl_gauge = QLabel("-")
         self.label_edit = QLineEdit()
-        self.label_edit.setPlaceholderText("예: A1 (폴더 이름에 들어감)")
-        self.label_edit.textChanged.connect(self._update_buttons)
-        pf.addRow("센서", self.lbl_sensor)
-        pf.addRow("게이지", self.lbl_gauge)
-        pf.addRow("라벨", self.label_edit)
+        self.label_edit.setPlaceholderText("e.g. A1 (used in the folder name)")
+        self.label_edit.textChanged.connect(self._on_label_changed)
+        pf.addRow("Sensor", self.lbl_sensor)
+        pf.addRow("Gauge", self.lbl_gauge)
+        pf.addRow("Label", self.label_edit)
 
-        nl = QGroupBox("2. 무부하 확인 (손 뗀 상태)")
+        nl = QGroupBox("2. No-load check (hands off)")
         nf = QVBoxLayout(nl)
         row = QHBoxLayout()
-        self.noload_btn = QPushButton(f"무부하 확인 ({self.settings['noload_check_s']:g} s)")
+        self.noload_btn = QPushButton(f"No-load check ({self.settings['noload_check_s']:g} s)")
         self.noload_btn.clicked.connect(self.start_noload)
-        self.cal_btn = QPushButton("캘리브레이션")
-        self.cal_btn.setToolTip("캘리브레이션 탭과 같은 동작 (PXSR과 같은 명령, 영점은 센서 펌웨어가 잡음)")
+        self.cal_btn = QPushButton("Calibrate")
+        self.cal_btn.setToolTip("Same as the Calibration tab (same command as PXSR; the sensor firmware sets the zero)")
         self.cal_btn.clicked.connect(self.calibrate_requested)
         row.addWidget(self.noload_btn, 1)
         row.addWidget(self.cal_btn)
-        self.lbl_noload = QLabel("아직 안 함 (기록만 하고 값 보정에는 쓰지 않음)")
+        self.lbl_noload = QLabel(NOLOAD_IDLE)
         self.lbl_noload.setWordWrap(True)
         nf.addLayout(row)
         nf.addWidget(self.lbl_noload)
 
-        rec = QGroupBox("3. 기록")
+        rec = QGroupBox("3. Record")
         rf = QVBoxLayout(rec)
         guide = QLabel(GUIDE.format(max=float(self.settings["max_N"])))
         guide.setWordWrap(True)
         row2 = QHBoxLayout()
-        self.start_btn = QPushButton("기록 시작")
+        self.start_btn = QPushButton("Start recording")
         self.start_btn.setProperty("primary", True)
         self.start_btn.clicked.connect(self.start_recording)
-        self.stop_btn = QPushButton("정지 → 분석")
+        self.stop_btn = QPushButton("Stop → analyze")
         self.stop_btn.clicked.connect(lambda: self.stop_recording(cancel=False))
-        self.cancel_btn = QPushButton("취소")
-        self.cancel_btn.setToolTip("기록 파일만 남기고 분석하지 않음 (결과 탭에서 나중에 재분석 가능)")
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setToolTip("Keep the recorded files without analyzing (can be re-analyzed later from the Results tab)")
         self.cancel_btn.clicked.connect(lambda: self.stop_recording(cancel=True))
         row2.addWidget(self.start_btn, 1)
         row2.addWidget(self.stop_btn)
@@ -118,14 +123,14 @@ class BenchPanel(QWidget):
         ll.addWidget(rec)
         ll.addStretch(1)
 
-        # ── 기록 화면 ──
+        # ── recording view ──
         self.plot = pg.PlotWidget()
-        self.plot.setLabel("left", "힘 (N)")
-        self.plot.setLabel("bottom", "시간 (s)")
-        self.plot.showGrid(x=True, y=True, alpha=0.3)
+        self.plot.setLabel("left", "Force (N)")
+        self.plot.setLabel("bottom", "Time (s)")
+        self.grid = LightGrid(self.plot, x_ticks=range(-int(WINDOW_S), 1))   # showGrid is slow (light_grid.py)
         self.plot.addLegend()
-        self.sensor_curve = self.plot.plot(pen=pg.mkPen("#5c9dff", width=2), name="센서 |F|")
-        self.gauge_curve = self.plot.plot(pen=pg.mkPen("#f0f0f0", width=2), name="게이지")
+        self.sensor_curve = self.plot.plot(pen=pg.mkPen("#5c9dff", width=2), name="Sensor |F|")
+        self.gauge_curve = self.plot.plot(pen=pg.mkPen("#f0f0f0", width=2), name="Gauge")
         self.max_line = pg.InfiniteLine(pos=float(self.settings["max_N"]), angle=0,
                                         pen=pg.mkPen(theme.BAD, width=1, style=Qt.DashLine))
         self.plot.addItem(self.max_line)
@@ -145,16 +150,16 @@ class BenchPanel(QWidget):
         self.lbl_force = QLabel("-")
         self.lbl_force.setAlignment(Qt.AlignCenter)
         barbox = QVBoxLayout()
-        barbox.addWidget(QLabel("게이지"), 0, Qt.AlignHCenter)
+        barbox.addWidget(QLabel("Gauge"), 0, Qt.AlignHCenter)
         barbox.addWidget(self.bar, 1)
         barbox.addWidget(self.lbl_force)
 
         self.map = SensorMap()
         self.map.setMinimumWidth(240)
-        self.lbl_cov = QLabel("커버리지: 기록을 시작하면 표시")
+        self.lbl_cov = QLabel(COVERAGE_IDLE)
         self.lbl_cov.setWordWrap(True)
         mapbox = QVBoxLayout()
-        mapbox.addWidget(QLabel("커버리지 (구역별 안정 샘플 수 · 힘 구간)"))
+        mapbox.addWidget(QLabel("Coverage (stable samples per zone · force bins)"))
         mapbox.addWidget(self.map, 1)
         mapbox.addWidget(self.lbl_cov)
 
@@ -186,28 +191,53 @@ class BenchPanel(QWidget):
         self._n = 0
         self._update_buttons()
 
-    # ── 장치 (메인 창에서) ──
+    # ── devices (from the main window) ──
     def set_sensor(self, sensor, info: Optional[dict] = None) -> None:
         self.sensor = sensor
         self.sensor_info = dict(info or {})
         if sensor is None and self.session is not None and self.session.status == "recording":
-            self.stop_recording(cancel=False, reason="센서 연결이 끊겨 기록을 멈췄습니다")
+            self.stop_recording(cancel=False, reason="Recording stopped: sensor disconnected")
+        if sensor is not None and sensor is not self._last_sensor and not self.recording:
+            # a new connection (another sensor on the same port is also a new reader object): the previous
+            # sensor's no-load check / calibration events and coverage belong to that sensor, not this one
+            self.pending_events = []
+            self._noload_t0 = None
+            self.lbl_noload.setText(NOLOAD_IDLE)
+            self._clear_previous()
+        if sensor is not None:
+            self._last_sensor = sensor
+        self._update_buttons()
+
+    def _clear_previous(self) -> None:
+        """Clear the finished test's coverage map and status (files and the Results tab are untouched)."""
+        if self.recording:
+            return
+        self.session = None
+        self.coverage = None
+        self.map.clear_zones()
+        self.lbl_cov.setText(COVERAGE_IDLE)
+        if not self.analyzing:
+            self.lbl_rec.setText("-")
+
+    def _on_label_changed(self, _text: str) -> None:
+        if self.session is not None and not self.recording:
+            self._clear_previous()   # a new label = a new test
         self._update_buttons()
 
     def set_gauge(self, gauge, info: Optional[dict] = None) -> None:
         self.gauge = gauge
         self.gauge_info = dict(info or {})
         if gauge is None and self.session is not None and self.session.status == "recording":
-            self.stop_recording(cancel=False, reason="게이지 연결이 끊겨 기록을 멈췄습니다")
+            self.stop_recording(cancel=False, reason="Recording stopped: gauge disconnected")
         self._update_buttons()
 
     def on_stalled(self, info: dict):
-        """센서 수신 멈춤: 기록 중이면 멈춘 시점까지 저장하고 정지 → 분석. 저장한 세션 폴더 (기록 중이 아니면 None)."""
+        """Sensor data stalled: if recording, save up to the stall and stop → analyze. Returns the saved session folder (None if not recording)."""
         if not self.recording:
             return None
         sess = self.session
         self.note_event("sensor_stalled", info.get("t"), stall_s=info.get("stall_s"))
-        self.stop_recording(cancel=False, reason="센서 수신이 멈춰 기록을 멈췄습니다 (멈춘 시점까지 저장)")
+        self.stop_recording(cancel=False, reason="Recording stopped: sensor data stalled (saved up to the stall)")
         return sess.folder
 
     @property
@@ -217,12 +247,12 @@ class BenchPanel(QWidget):
     def ready(self) -> bool:
         return _receiving(self.sensor) and _receiving(self.gauge)
 
-    # ── 무부하 확인 ──
+    # ── no-load check ──
     def start_noload(self) -> None:
         if not self.ready() or self._noload_t0 is not None:
             return
         self._noload_t0 = self.clock.wall()
-        self.lbl_noload.setText("확인 중… 센서·게이지에서 손을 떼세요")
+        self.lbl_noload.setText("Checking… keep hands off the sensor and gauge")
         self._update_buttons()
 
     def _finish_noload(self) -> None:
@@ -234,12 +264,12 @@ class BenchPanel(QWidget):
         s = "-" if r["sensor_F_mean_N"] is None else f"{r['sensor_F_mean_N']:.2f} N"
         warn = r["warnings"]
         color = theme.WARN if warn else theme.OK
-        text = f"게이지 {g}, 센서 |F| {s}" + (" — " + "; ".join(warn) if warn else " — 정상")
+        text = f"Gauge {g}, sensor |F| {s}" + (" — " + "; ".join(warn) if warn else " — OK")
         self.lbl_noload.setText(f"<span style='color:{color}'>{text}</span>")
         self._update_buttons()
 
     def note_event(self, kind: str, t: Optional[float] = None, **info) -> None:
-        """준비 중이면 모아 두고, 기록 중이면 세션에 바로 남긴다."""
+        """Collect while preparing; log straight to the session while recording."""
         t = time.time() if t is None else t
         if self.recording:
             self.session.note_event(kind, t, **info)
@@ -247,12 +277,12 @@ class BenchPanel(QWidget):
             self.pending_events.append({"kind": kind, "t": t, **info})
 
     def note_calibration(self, result) -> None:
-        """캘리브레이션 탭(또는 이 탭 버튼)에서 1회가 끝나면."""
+        """When one calibration run finishes in the Calibration tab (or via this tab's button)."""
         d = result.to_dict()
         d.pop("requested", None)
         self.note_event("calibration", result.requested, **d)
 
-    # ── 기록 ──
+    # ── recording ──
     def start_recording(self) -> None:
         if self.recording or not self.ready() or not self.label_edit.text().strip():
             return
@@ -288,11 +318,11 @@ class BenchPanel(QWidget):
             sess.gauge.remove_sink(cov.add_gauge)
         sess.stop(cancelled=cancel)
         self.session_saved.emit(sess.folder)
-        msg = (reason + ". " if reason else "") + f"저장: {sess.folder.name}"
+        msg = (reason + ". " if reason else "") + f"Saved: {sess.folder.name}"
         if cancel or sess.sensor_csv is None:
-            self.lbl_rec.setText(msg + (" (취소 — 분석 안 함)" if cancel else " (센서 기록 없음 — 분석 안 함)"))
+            self.lbl_rec.setText(msg + (" (cancelled — not analyzed)" if cancel else " (no sensor data — not analyzed)"))
         else:
-            self.lbl_rec.setText(msg + " — 분석 중…")
+            self.lbl_rec.setText(msg + " — analyzing…")
             self._analyze(sess.folder)
         self._update_buttons()
 
@@ -302,7 +332,7 @@ class BenchPanel(QWidget):
         def work():
             try:
                 res = analyze_session(folder)
-            except Exception as e:   # 분석 실패해도 기록 파일은 남아 있음
+            except Exception as e:   # the recorded files remain even if analysis fails
                 self.analyzing = False
                 self.analysis_failed.emit(f"{folder.name}: {e}")
                 return
@@ -312,10 +342,10 @@ class BenchPanel(QWidget):
         threading.Thread(target=work, daemon=True, name="BenchAnalyze").start()
 
     def analysis_done(self, res) -> None:
-        self.lbl_rec.setText(f"분석 완료: {res.folder.name} (결과 탭)")
+        self.lbl_rec.setText(f"Analysis done: {res.folder.name} (Results tab)")
         self._update_buttons()
 
-    # ── 화면 ──
+    # ── display ──
     def _update_buttons(self) -> None:
         rec = self.recording
         ready = self.ready()
@@ -334,15 +364,15 @@ class BenchPanel(QWidget):
         s, g = self.sensor, self.gauge
         if s is not None:
             ok = _receiving(s)
-            self.lbl_sensor.setText(f"{s.sensor_type.label}, {s.buffer.rate(now):.0f} Hz" if ok else "값 없음")
+            self.lbl_sensor.setText(f"{s.sensor_type.label}, {s.buffer.rate(now):.0f} Hz" if ok else "No values")
         else:
-            self.lbl_sensor.setText("연결 안 됨 (왼쪽 센서 패널)")
+            self.lbl_sensor.setText("Not connected (sensor panel, left)")
         if g is not None:
             ok = _receiving(g)
             v = g.latest()
-            self.lbl_gauge.setText(f"{g.port}, {g.buffer.rate(now):.0f} Hz, {v:.1f} N" if ok and v is not None else "값 없음")
+            self.lbl_gauge.setText(f"{g.port}, {g.buffer.rate(now):.0f} Hz, {v:.1f} N" if ok and v is not None else "No values")
         else:
-            self.lbl_gauge.setText("연결 안 됨 (왼쪽 Force gauge 패널)")
+            self.lbl_gauge.setText("Not connected (Force gauge panel, left)")
         if self._noload_t0 is not None and now - self._noload_t0 >= float(self.settings["noload_check_s"]):
             self._finish_noload()
         if self._n % 5 == 0:
@@ -377,11 +407,11 @@ class BenchPanel(QWidget):
         cov, sess = self.coverage, self.session
         cov.update()
         elapsed = now - (sess.started_at or now)
-        self.lbl_rec.setText(f"기록 중 {int(elapsed // 60)}:{int(elapsed % 60):02d} — 센서 {sess.sensor_rows}행, "
-                             f"게이지 {sess.gauge_rows}개 → {sess.folder.name}")
+        self.lbl_rec.setText(f"Recording {int(elapsed // 60)}:{int(elapsed % 60):02d} — sensor {sess.sensor_rows} rows, "
+                             f"gauge {sess.gauge_rows} samples → {sess.folder.name}")
         zs = cov.zones
         if zs is None:
-            self.lbl_cov.setText(f"안정 샘플 {cov.total_stable} (이 센서는 구역 정의 없음)")
+            self.lbl_cov.setText(f"Stable samples {cov.total_stable} (no zones defined for this sensor)")
             return
         enough = cov.enough()
         need = int(self.settings["zone_min_samples"])
@@ -394,6 +424,6 @@ class BenchPanel(QWidget):
         self.map.show_zones(colors, labels)
         b = cov.bins
         self.lbl_cov.setText(
-            f"안정 샘플 {cov.total_stable} (접촉 {cov.total_contact}, 위치 없음 {cov.no_zone}) · "
-            f"충분 {int(enough.sum())}/{len(enough)} 구역 (안정 {need}개 이상 + 힘 구간 2개 이상) · "
-            f"■ = 힘 구간 {b[0]:g}–{b[1]:g} / {b[1]:g}–{b[2]:g} / {b[2]:g} N 이상")
+            f"Stable samples {cov.total_stable} (contact {cov.total_contact}, no position {cov.no_zone}) · "
+            f"enough {int(enough.sum())}/{len(enough)} zones (≥{need} stable + ≥2 force bins) · "
+            f"■ = force bins {b[0]:g}–{b[1]:g} / {b[1]:g}–{b[2]:g} / ≥{b[2]:g} N")

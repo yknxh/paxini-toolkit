@@ -1,7 +1,7 @@
-"""캘리브레이션 (계획 P4).
+"""Calibration (plan P4).
 
-명령 바이트·순서·0.5 s 대기가 PXSR 캡처와 같은지는 캡처 재생 테스트(`test_usb_sensor.py`)가 확인한다.
-여기서는 결과 판정(PXSR 화면과 같은 규칙), 실행 기록, 사이드카 기록을 시뮬레이션 센서 + 가상 시계로 확인한다.
+Command bytes, order and the 0.5 s wait matching the PXSR capture are checked by the capture replay test (`test_usb_sensor.py`).
+Here, outcome judgment (same rules as the PXSR screen), run history and sidecar notes are checked with the simulated sensor + virtual clock.
 """
 import json
 
@@ -18,7 +18,7 @@ from usb_replay import CASES, run_replay  # noqa: E402
 
 
 class NoAckTransport(SimUsbTransport):
-    """캘리브레이션 명령에 응답하지 않는 센서."""
+    """Sensor that does not answer the calibration command."""
 
     def _respond(self, d):
         if d[6] == codec.USB_FUNC_WRITE:
@@ -27,7 +27,7 @@ class NoAckTransport(SimUsbTransport):
 
 
 class FailAckTransport(SimUsbTransport):
-    """기능 코드 126 + 상태 1로 응답하는 센서 (PXSR이 Setting.failed 경고를 띄우는 경우)."""
+    """Sensor that answers with function code 126 + status 1 (the case where PXSR shows a Setting.failed warning)."""
 
     def _cal_ack(self, d):
         f = [0xAA, 0x55, *d[2:6], 126, *d[7:13], 1]
@@ -57,7 +57,7 @@ def _cal_sent(tr):
 
 def test_ack_result_and_before_after():
     clock, tr, s = _sim()
-    _drive(clock, s, 1.0)            # 시뮬레이션 누름 최고점 근처 (주기 4 s)
+    _drive(clock, s, 1.0)            # near the simulated press peak (4 s period)
     run = CalibrationRun(s, {"port": "sim"}).start()
     _drive(clock, s, 3.0, run)
     r = run.result
@@ -65,7 +65,7 @@ def test_ack_result_and_before_after():
     assert len(_cal_sent(tr)) == 1
     assert r.sent - r.requested == pytest.approx(0.5, abs=0.0011)   # O3: m2(.5)
     assert r.acked - r.sent == pytest.approx(tr.response_delay, abs=0.0011)
-    # 시뮬레이션 센서는 받은 순간 값을 영점으로 삼는다 → 후 값이 작아진다 (앱은 아무것도 빼지 않음)
+    # the simulated sensor takes the value at receipt as zero → after value drops (the app subtracts nothing)
     assert r.before[2] > 50 and r.after[2] < r.before[2] / 4
     assert r.info["sensor"] == "S1813E" and r.info["service_id"] == 3 and r.info["port"] == "sim"
     assert s._listeners == []
@@ -77,7 +77,7 @@ def test_no_ack_stops_polling_like_pxsr():
     run = CalibrationRun(s).start()
     _drive(clock, s, 6.0, run)
     assert run.result.outcome == "no_ack" and run.result.acked is None
-    # PXSR: c0(isStopUsbGetData)가 계속 true → 폴링 재개 없음 (재시도 없음)
+    # PXSR: c0 (isStopUsbGetData) stays true → polling never resumes (no retry)
     t_cal = _cal_sent(tr)[0]
     assert [d for t, d in tr.written if t > t_cal] == []
 
@@ -93,11 +93,11 @@ def test_failed_ack_warns_and_resumes_polling():
     assert "warning" in events
     t_cal = _cal_sent(tr)[0]
     after = [d for t, d in tr.written if t > t_cal]
-    assert after and after[0] == codec.usb_get_type_data(3, 31)   # 경고만 띄우고 폴링은 재개
+    assert after and after[0] == codec.usb_get_type_data(3, 31)   # only warns; polling resumes
 
 
 def test_double_press_sends_twice_like_pxsr():
-    """PXSR 버튼은 중복 클릭을 막지 않는다 → 0.5 s 안에 두 번 누르면 명령도 두 번."""
+    """The PXSR button does not block double clicks → two presses within 0.5 s send the command twice."""
     clock, tr, s = _sim()
     _drive(clock, s, 1.0)
     r1 = CalibrationRun(s).start()
@@ -142,14 +142,14 @@ def test_sidecar_has_calibration_event(tmp_path):
 
 @pytest.mark.parametrize("case", [c for c in CASES], ids=[c.name for c in CASES])
 def test_replay_calibration_result(case):
-    """PXSR 캡처 재생: 캡처의 캘리브레이션 응답이 "ack"(PXSR: 메시지 없이 폴링 재개)로 판정된다."""
+    """PXSR capture replay: the captured calibration response is judged "ack" (PXSR: polling resumes with no message)."""
     runs = []
 
     def setup(s):
         orig = s.calibrate
 
         def calibrate():
-            if not runs:   # 재생 도구가 s.calibrate()를 부르면 그 자리에서 실행 추적을 시작
+            if not runs:   # when the replay tool calls s.calibrate(), start tracking the run right there
                 s.calibrate = orig
                 run = CalibrationRun(s)
                 runs.append(run)
@@ -160,7 +160,7 @@ def test_replay_calibration_result(case):
 
     tr, s, frames, calls = run_replay(case, setup)
     if not calls:
-        pytest.skip("캘리브레이션 없는 캡처")
+        pytest.skip("capture without calibration")
     run = runs[0]
     run.poll(now=run.result.acked + 1.0 if run.result.acked else None)
     assert run.result.outcome == "ack" and run.result.status == 0

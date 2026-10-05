@@ -1,8 +1,9 @@
-"""앱이 기억하는 값 (`data/state.json`).
+"""Values the app remembers (`data/state.json`).
 
-PXSR은 마지막으로 쓴 센서 타입을 `config/sensor.json`의 `serialPort.specification`에 저장하고,
-다음 연결에서 버전 응답이 없을 때 그 타입의 taxel 수로 데이터를 요청한다 (`K`, 456723).
-같은 동작을 위해 그 값만 저장한다. 기본값 S1813E는 PXSR 설치본 `config/sensor.json`의 값.
+PXSR saves the last used sensor type in `serialPort.specification` of `config/sensor.json`, and on the next
+connection, if there is no version response, requests data with that type's taxel count (`K`, 456723).
+That value is saved here for the same behavior. The default S1813E is the value in the PXSR install's `config/sensor.json`.
+Otherwise only UI choices are saved (`live_heatmap`: live tab heatmap on, default off).
 """
 from __future__ import annotations
 

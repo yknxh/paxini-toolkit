@@ -1,4 +1,4 @@
-"""Force gauge 리더 (계획 P5). 실기 형식은 paxtest에서 확인한 값(2400 baud, 구분자 없는 6글자 N 레코드)."""
+"""Force gauge reader (plan P5). Real-device format as confirmed in paxtest (2400 baud, 6-character N records with no delimiter)."""
 import threading
 import time
 
@@ -12,7 +12,7 @@ from paxkit.device.usb import UsbSensor
 from paxkit.gauge import SerialGauge, SimGauge, sensor_lag, xcorr_offset
 
 STREAM = b"0000.0-000.3-004.9-012.30000.1"
-VALUES = [-0.0, 0.3, 4.9, 12.3, -0.1]   # invert: 누름('-')이 +
+VALUES = [-0.0, 0.3, 4.9, 12.3, -0.1]   # invert: pressing ('-') becomes +
 
 
 def _cfg(**kw):
@@ -20,7 +20,7 @@ def _cfg(**kw):
 
 
 class StepClock:
-    """wall()이 정해 둔 값을 차례로 돌려준다."""
+    """wall() returns preset values in order."""
 
     def __init__(self, times):
         self.times = list(times)
@@ -33,7 +33,7 @@ class StepClock:
 
 
 class FakeSerial:
-    """read/read_until이 정해 둔 조각을 차례로 돌려주고, 다 쓰면 리더를 멈춘다."""
+    """read/read_until return preset chunks in order, and stop the reader when exhausted."""
 
     def __init__(self, chunks, gauge=None):
         self.chunks = list(chunks)
@@ -100,8 +100,8 @@ def test_noise_and_partial_record():
 
 
 def test_stream_arrival_time_correction():
-    """한 번에 읽힌 레코드는 뒤에 남은 바이트 수 × 10/baud 만큼 도착 시각을 앞당기고 (paxtest와 같음),
-    레코드 전송 시간(6바이트)만큼 더 앞당겨 첫 바이트 시각으로 둔다. latency_s도 뺀다."""
+    """Records read at once are moved earlier by (bytes that follow) × 10/baud (same as paxtest),
+    then earlier by the record transmission time (6 bytes) to the first-byte time. latency_s is subtracted too."""
     g = SerialGauge(_cfg(latency_s=0.0), clock=StepClock([100.0]))
     out, _ = _run(g, [b"0000.0-000.3"])
     byte_s = 10.0 / 2400
@@ -155,7 +155,7 @@ def test_xcorr_offset_finds_delay():
     t = np.arange(0, 10, 0.1)
     f = np.maximum(0, np.sin(2 * np.pi * t / 2.5)) * 10
     tp = np.arange(0, 10, 0.01)
-    fp = np.interp(tp - 0.08, t, f)   # 센서가 80 ms 늦음
+    fp = np.interp(tp - 0.08, t, f)   # sensor is 80 ms late
     off, r = xcorr_offset(t, f, tp, fp, 1.0, 9.0, 0.5)
     assert off == pytest.approx(0.08, abs=0.011) and r > 0.95
 
@@ -169,7 +169,7 @@ def test_sensor_lag_needs_movement():
 
 
 def test_sim_sensor_and_gauge_same_clock():
-    """시뮬레이션 센서와 같은 하중을 읽는 게이지: 같은 시계라 보정 없이 지연이 거의 0 (P5 완료 기준의 장비 없는 버전)."""
+    """Gauge reading the same load as the simulated sensor: same clock, so lag is near 0 without correction (hardware-free version of the P5 completion criterion)."""
     tr = SimUsbTransport("S1813E", period=1.0)
     s = UsbSensor(tr)
     g = SimGauge(tr.load_N, noise_N=0.0, rate_hz=50, clock=s.clock)

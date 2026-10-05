@@ -1,8 +1,8 @@
-"""실기 캡처(USBPcap) + 같은 시간대 PXSR CSV로 USB 프로토콜 재구현을 검증한다 (계획 P1a).
+"""Verify the USB protocol reimplementation against a real capture (USBPcap) + PXSR CSV from the same period (plan P1a).
 
-fixture 폴더마다:
-  serial.jsonl.gz  tools/usbpcap_extract.py 출력 (PC↔센서 바이트, 수신 시각)
-  *.csv            같은 캡처 동안 PXSR이 기록한 원본 CSV
+Each fixture folder:
+  serial.jsonl.gz  tools/usbpcap_extract.py output (PC↔sensor bytes, receive times)
+  *.csv            original CSV logged by PXSR during the same capture
 """
 import datetime as dt
 import gzip
@@ -23,7 +23,7 @@ def _load_serial(case: Path):
 
 
 def _replay(rows):
-    """캡처한 수신 바이트를 PXSR 파서(`parseUsbData`) 순서 그대로 재생한다."""
+    """Replay the captured received bytes through the PXSR parser (`parseUsbData`) in the same order."""
     parser = codec.UsbParser()
     forces = codec.DEFAULT_FORCES
     versions, frames = [], []
@@ -31,7 +31,7 @@ def _replay(rows):
         data = bytes.fromhex(r["hex"])
         if r["dir"] == "tx":
             if data == codec.usb_get_version(data[4]):
-                parser.reset()   # getVersion이 버퍼를 비운다
+                parser.reset()   # getVersion clears the buffer
             continue
         if r["dir"] != "rx":
             continue
@@ -48,7 +48,7 @@ def _replay(rows):
 
 
 def _load_csv(path: Path):
-    date = path.stem[:10]   # 파일명 YYYY-MM-DD-HHMMSS
+    date = path.stem[:10]   # file name YYYY-MM-DD-HHMMSS
     out = []
     with open(path, "rb") as f:
         f.readline()
@@ -61,7 +61,7 @@ def _load_csv(path: Path):
 
 @pytest.mark.parametrize("case", CASES, ids=[c.name for c in CASES])
 def test_commands_reproduced(case):
-    """PXSR이 보낸 명령 바이트를 codec 함수로 전부 똑같이 만들 수 있다."""
+    """Every command byte sequence PXSR sent can be reproduced exactly by codec functions."""
     rows = _load_serial(case)
     versions, _ = _replay(rows)
     sid = versions[0][0]
@@ -70,13 +70,13 @@ def test_commands_reproduced(case):
     known |= {codec.usb_get_type_data(sid, forces), codec.usb_set_calibration(sid)}
     tx = [bytes.fromhex(r["hex"]) for r in rows if r["dir"] == "tx"]
     assert tx and all(b in known for b in tx)
-    # 연결 순서: serviceID 0..8 버전 조회 → 데이터 폴링
+    # connect sequence: version query for serviceID 0..8 → data polling
     assert tx[:9] == [codec.usb_get_version(i) for i in codec.USB_SCAN_IDS]
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c.name for c in CASES])
 def test_parsed_values_match_pxsr_csv(case):
-    """PXSR CSV의 모든 행 = 캡처 바이트를 파싱한 프레임 (모든 열, 1:1, 건너뜀·중복 없음)."""
+    """Every PXSR CSV row = a frame parsed from captured bytes (all columns, 1:1, no skips or duplicates)."""
     _, frames = _replay(_load_serial(case))
     csvs = sorted(case.glob("*.csv"))
     assert csvs
@@ -84,9 +84,9 @@ def test_parsed_values_match_pxsr_csv(case):
         rows = _load_csv(path)
         j, used = 0, []
         for t, vals in rows:
-            # 행 시각 직전에 수신이 끝난 프레임 (USBPcap·JS 시계 차이로 2 ms 여유)
+            # frame whose reception ended just before the row time (2 ms slack for USBPcap/JS clock difference)
             while j + 1 < len(frames) and frames[j + 1][0] <= t + 0.002:
                 j += 1
             assert frames[j][1] == vals, f"{path.name} {t}"
             used.append(j)
-        assert used == list(range(used[0], used[0] + len(rows))), f"{path.name}: 프레임 대응이 1:1이 아님"
+        assert used == list(range(used[0], used[0] + len(rows))), f"{path.name}: frame mapping is not 1:1"

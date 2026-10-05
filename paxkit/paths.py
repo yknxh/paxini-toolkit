@@ -1,7 +1,7 @@
-"""레포 루트와 data/ 경로 (패키지 위치 기준이라 실행 위치(cwd)와 무관).
+"""Repo root and data/ paths (based on the package location, so independent of the working directory (cwd)).
 
-데이터는 레포 안 data/ 에 저장한다 (PXSR처럼 AppData에 두지 않음). 레포를 그대로 쓰는
-editable 설치(`pip install -e .`)를 전제로 한다.
+Data is stored in data/ inside the repo (not in AppData like PXSR). Assumes an editable install
+(`pip install -e .`) that uses the repo in place.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ DEFAULT_CONFIG_PATH = REPO_ROOT / "config.yaml"
 
 
 def data_path(*parts: str, create: bool = True) -> Path:
-    """data/ 아래 폴더 경로. 예) data_path("logs") → <repo>/data/logs (없으면 만든다)."""
+    """Folder path under data/. e.g. data_path("logs") → <repo>/data/logs (created if missing)."""
     p = DATA_DIR.joinpath(*parts)
     if create:
         p.mkdir(parents=True, exist_ok=True)

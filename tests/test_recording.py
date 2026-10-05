@@ -1,9 +1,9 @@
-"""데이터 로깅이 PXSR과 바이트 단위로 같은 CSV를 만드는지 확인한다 (계획 P3).
+"""Check that data logging produces CSVs byte-identical to PXSR (plan P3).
 
-1. 재생 테스트: 실기 캡처를 `UsbSensor`로 재생하면서 PXSR이 기록하던 구간에 `CsvRecorder`를 켜고,
-   각 행의 수신 시각에는 PXSR CSV의 `Timestamp`를 넣는다 → 결과 파일 = PXSR CSV (`cmp` 차이 0, 파일명 포함).
-2. 재작성 테스트: PXSR CSV를 읽어 같은 헤더·값을 csv-writer 이식본으로 다시 쓰면 원본과 같다.
-3. 헤더 테스트: PXSR CSV에 있는 모든 센서 배치(슬롯 2개, 채널 4개 등)를 `W0` 이식본이 똑같이 만든다.
+1. Replay test: replay a real capture with `UsbSensor`, run `CsvRecorder` over the span PXSR was logging,
+   and use the PXSR CSV `Timestamp` as each row's receive time → output file = PXSR CSV (`cmp` diff 0, file name included).
+2. Rewrite test: reading a PXSR CSV and rewriting the same header and values with the csv-writer port gives the original.
+3. Header test: the `W0` port reproduces every sensor layout found in PXSR CSVs (2 slots, 4 channels, etc.).
 """
 import itertools
 import json
@@ -30,7 +30,7 @@ PXSR_LOG_DIR = Path.home() / "AppData/Roaming/pxsr-gen3/DataLogging"
 
 
 def _parse_csv(path: Path):
-    """PXSR CSV → (헤더, [(시각 문자열, [정수 | None, ...]), ...]). PXSR CSV에는 따옴표가 없다."""
+    """PXSR CSV → (header, [(time string, [int | None, ...]), ...]). PXSR CSVs contain no quotes."""
     lines = path.read_bytes().split(b"\n")
     assert lines[-1] == b""
     header = lines[0].decode("utf-8").split(",")
@@ -49,23 +49,23 @@ def _start_time(path: Path) -> datetime:
     return datetime.strptime(path.stem, "%Y-%m-%d-%H%M%S")
 
 
-# ── 1. 재생 테스트 ───────────────────────────────────────────────────
+# ── 1. Replay test ───────────────────────────────────────────────────
 @pytest.fixture(scope="module", params=CASES, ids=[c.name for c in CASES])
 def replayed(request, tmp_path_factory):
     case = request.param
     tr, _, frames, _ = run_replay(case)
-    # 프레임 k = 캡처의 k번째 데이터 응답 (test_usb_sensor에서 확인). 재생은 PXSR보다 빨리 요청하므로
-    # 가상 시각 대신 캡처의 수신 시각으로 CSV 행과 맞춘다.
+    # frame k = k-th data response in the capture (checked in test_usb_sensor). Replay requests faster than PXSR,
+    # so CSV rows are matched by the capture's receive times instead of virtual time.
     cap_t = [st[1] + st[2][-1][0] for st in tr.steps
              if st[0][6] == codec.USB_FUNC_READ and int.from_bytes(st[0][7:11], "little") == codec.USB_ADDR_DATA
              and st[2]]
     assert len(cap_t) == len(frames)
-    sessions = []   # (PXSR CSV, 첫 프레임 번호, 행마다 Unix 시각)
+    sessions = []   # (PXSR CSV, first frame index, Unix time per row)
     for csv in sorted(case.glob("*.csv")):
         _, rows = _parse_csv(csv)
         times = [_unix(csv, ts) for ts, _ in rows]
         values = [tuple(v) for _, v in rows]
-        # 행 = 연속한 프레임 (P1a에서 1:1 확인). 시각이 가까운 곳에서 값이 전부 같은 시작점을 찾는다
+        # rows = consecutive frames (1:1, checked in P1a). Find the start near the time where all values match
         starts = [j for j in range(len(frames) - len(rows) + 1)
                   if abs(cap_t[j] - times[0]) < 0.05
                   and [f.values for f in frames[j:j + len(rows)]] == values]
@@ -78,7 +78,7 @@ def replayed(request, tmp_path_factory):
     def setup(sensor):
         counter = itertools.count()
 
-        def control(frame):   # PXSR 기록 버튼을 누른 구간만 기록기에 넘긴다 (시각은 PXSR CSV 값)
+        def control(frame):   # pass only the span where PXSR logging was on to the recorder (times from the PXSR CSV)
             i = next(counter)
             for csv, start, times in sessions:
                 if i == start:
@@ -99,7 +99,7 @@ def test_replay_csv_equals_pxsr_bytes(replayed):
     case, out, recs = replayed
     for csv in sorted(case.glob("*.csv")):
         rec = recs[csv.name]
-        assert rec.path == out / csv.name   # 파일명 = rs0(시작 시각)
+        assert rec.path == out / csv.name   # file name = rs0(start time)
         assert rec.path.read_bytes() == csv.read_bytes(), csv.name
     assert sorted(p.name for p in out.glob("*.csv")) == sorted(p.name for p in case.glob("*.csv"))
 
@@ -116,9 +116,9 @@ def test_replay_sidecar(replayed):
         assert s["version"].startswith("PAXINI PXSR-STDDP03")
 
 
-# ── 2. 재작성 테스트 ─────────────────────────────────────────────────
+# ── 2. Rewrite test ──────────────────────────────────────────────────
 def _pxsr_logs():
-    """설치 PC의 PXSR 기록 중 헤더 배치마다 가장 작은 파일 하나."""
+    """Among PXSR logs on this PC, the smallest file for each header layout."""
     if not PXSR_LOG_DIR.is_dir():
         return []
     best = {}
@@ -140,14 +140,14 @@ def test_rewrite_equals_original(src, tmp_path):
     rng = random.Random(src.name)
     records = [[ts] + vals for ts, vals in rows]
     i = 0
-    while i < len(records):   # 200 ms flush처럼 여러 번에 나눠 덧붙인다
+    while i < len(records):   # append in several chunks, like the 200 ms flush
         n = rng.randint(1, 40)
         w.write_records(records[i:i + n])
         i += n
     assert (tmp_path / src.name).read_bytes() == src.read_bytes()
 
 
-# ── 3. 헤더(W0) ──────────────────────────────────────────────────────
+# ── 3. Header (W0) ───────────────────────────────────────────────────
 def _fake_frame(taxels: int) -> Frame:
     return Frame(t=0.0, channel=0, slot=0, sensor="?", combine=(0, 0, 0), grid=(0,) * (3 * taxels))
 
@@ -157,7 +157,7 @@ HEADER_FILES = REWRITE_FILES
 
 @pytest.mark.parametrize("src", HEADER_FILES, ids=[f"{p.parent.name}/{p.name}" for p in HEADER_FILES])
 def test_header_layout_equals_pxsr(src):
-    """PXSR 헤더에서 센서 배치만 뽑아 `v.value` 모양을 만들면 `W0` 이식본이 같은 헤더를 만든다."""
+    """Building a `v.value`-shaped layout from a PXSR header makes the `W0` port produce the same header."""
     with open(src, "rb") as f:
         line = f.readline()
     header = line.rstrip(b"\n").decode("utf-8").split(",")
@@ -182,19 +182,19 @@ def test_header_and_row_skip_holes():
     ]
     row = pxsr_csv.build_row("01:02:03.004", sensors)
     assert pxsr_csv.csv_line(row) == "01:02:03.004," + ",".join(["0"] * 9) + ",1,-2,3,4,,6"
-    # taxel 값 개수가 3의 배수가 아니면 열은 올림 (`o2 < length/3`)
+    # if the taxel value count is not a multiple of 3, columns round up (`o2 < length/3`)
     odd = replace(_fake_frame(0), grid=(1, 2, 3, 4))
     assert pxsr_csv.build_header([[odd]])[-3:] == ["0-0-NxN-X[1]", "0-0-NxN-Y[1]", "0-0-NxN-Z[1]"]
 
 
-# ── 형식 함수 ────────────────────────────────────────────────────────
+# ── Format functions ─────────────────────────────────────────────────
 def test_filename_and_timestamp():
     assert pxsr_csv.log_filename(datetime(2026, 1, 2, 3, 4, 5)) == "2026-01-02-030405.csv"
     t = datetime(2026, 10, 4, 23, 6, 51, 99000).timestamp()
     assert pxsr_csv.format_timestamp(t) == "23:06:51.099"
-    assert pxsr_csv.format_timestamp(t + 0.00099) == "23:06:51.099"   # ms는 내림
+    assert pxsr_csv.format_timestamp(t + 0.00099) == "23:06:51.099"   # ms is floored
     assert pxsr_csv.format_timestamp(t + 0.001) == "23:06:51.100"
-    for ms in range(1000):   # float 오차로 ms가 내려가지 않는다
+    for ms in range(1000):   # float error does not drop the ms
         tt = datetime(2026, 10, 4, 0, 0, 0).timestamp() + ms / 1000
         assert pxsr_csv.format_timestamp(tt).endswith(f".{ms:03d}")
 
@@ -207,7 +207,7 @@ def test_stringify_field_rules():
         f(1.5)
 
 
-# ── 기록기 동작 ──────────────────────────────────────────────────────
+# ── Recorder behavior ────────────────────────────────────────────────
 def _sim_sensor():
     clock = VirtualClock(wall_base=time.time())
     tr = SimUsbTransport("S1813E", 3, clock=clock)
@@ -234,7 +234,7 @@ def test_no_rows_no_file(tmp_path):
 def test_file_created_at_first_flush(tmp_path):
     clock, s = _sim_sensor()
     _drive(clock, s, 1.5)
-    rec = CsvRecorder(s, tmp_path, interval=3600)   # 주기 flush가 오지 않게
+    rec = CsvRecorder(s, tmp_path, interval=3600)   # so no periodic flush happens
     path = rec.start(datetime(2026, 1, 2, 3, 4, 5))
     _drive(clock, s, 0.5)
     assert rec.line_count > 10 and not path.exists()
@@ -255,7 +255,7 @@ def test_periodic_flush_appends(tmp_path):
     deadline = time.monotonic() + 2
     while not path.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert path.exists() and rec.active   # 정지 전에 파일이 생긴다
+    assert path.exists() and rec.active   # the file exists before stop
     _drive(clock, s, 0.2)
     rec.stop()
     _, rows = _parse_csv(path)
@@ -264,7 +264,7 @@ def test_periodic_flush_appends(tmp_path):
 
 
 def test_disconnect_stops_recording(tmp_path):
-    """PXSR `s1`: 연결 해제를 시작하면 기록을 먼저 멈춘다 (`o.value&&G1()`)."""
+    """PXSR `s1`: starting disconnect stops logging first (`o.value&&G1()`)."""
     clock, s = _sim_sensor()
     _drive(clock, s, 1.5)
     rec = CsvRecorder(s, tmp_path)
@@ -280,8 +280,8 @@ def test_disconnect_stops_recording(tmp_path):
 
 
 def test_stall_notifies_and_saves_until_stall(tmp_path):
-    """수신 멈춤 (2026-10-05 사용자 결정): 다시 요청하지 않고 (PXSR과 같음) 알림 이벤트 + 멈춘 시점까지 저장하고 기록 정지.
-    캘리브레이션 응답으로 폴링이 다시 시작되면 resumed (기록은 다시 시작하지 않음)."""
+    """Receive stall (user decision 2026-10-05): no re-request (same as PXSR), a notification event + save up to the stall and stop logging.
+    When polling restarts on a calibration response, resumed (logging does not restart)."""
     clock, s = _sim_sensor()
     events = []
     s.add_listener(lambda k, info: events.append((k, info)))
@@ -290,13 +290,13 @@ def test_stall_notifies_and_saves_until_stall(tmp_path):
     path = rec.start()
     _drive(clock, s, 0.5)
     s.transport.mute = True
-    _drive(clock, s, 0.05)   # 이미 예약된 요청 하나는 나간다
+    _drive(clock, s, 0.05)   # one already scheduled request goes out
     n_sent = len(s.transport.written)
     _drive(clock, s, 0.85)
-    assert rec.active and not s.stalled   # 1 s 전에는 멈춤으로 보지 않는다
+    assert rec.active and not s.stalled   # not treated as a stall before 1 s
     _drive(clock, s, 0.2)
     assert s.stalled and not rec.active
-    assert len(s.transport.written) == n_sent   # 재시도 명령 없음 (PXSR과 같음)
+    assert len(s.transport.written) == n_sent   # no retry command (same as PXSR)
     stalled = [i for k, i in events if k == "stalled"]
     assert len(stalled) == 1 and stalled[0]["t"] == s.last_rx
     _, rows = _parse_csv(path)
@@ -304,7 +304,7 @@ def test_stall_notifies_and_saves_until_stall(tmp_path):
     side = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
     assert [e["kind"] for e in side["events"]] == ["stalled"]
     _drive(clock, s, 2.0)
-    assert len([k for k, _ in events if k == "stalled"]) == 1   # 한 번만
+    assert len([k for k, _ in events if k == "stalled"]) == 1   # only once
     s.transport.mute = False
     s.calibrate()
     _drive(clock, s, 1.0)
@@ -313,7 +313,7 @@ def test_stall_notifies_and_saves_until_stall(tmp_path):
     assert rec.line_count == len(rows)
 
 
-# ── 읽기 ─────────────────────────────────────────────────────────────
+# ── Reading ──────────────────────────────────────────────────────────
 def test_reader_on_fixture():
     src = sorted(CASES[0].glob("*.csv"))[0]
     d = read_log(src)

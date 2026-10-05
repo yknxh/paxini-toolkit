@@ -1,6 +1,7 @@
-"""센서 구역 (계획 P6-3): 모델마다 taxel 묶음 `zones/<label>.json` (초안은 `tools/make_zones.py`).
+"""Sensor zones (plan P6-3): taxel groups per model in `zones/<label>.json` (draft from `tools/make_zones.py`).
 
-구역 판정: taxel Z(음수는 0)를 구역별로 더해 가장 큰 구역. 전체 합이 `min_taxel_sum`(raw)보다 작으면 위치 없음(-1).
+Zone classification: sum taxel Z (negatives as 0) per zone and take the largest. If the total is below
+`min_taxel_sum` (raw), there is no position (-1).
 """
 from __future__ import annotations
 
@@ -22,8 +23,8 @@ NO_ZONE = -1
 class Zone:
     id: str
     name: str
-    row: int        # 0 = 끝 (그림 위쪽)
-    col: int        # 0 = 왼쪽
+    row: int        # 0 = tip (top of the figure)
+    col: int        # 0 = left
     taxels: Tuple[int, ...]
 
 
@@ -33,26 +34,26 @@ class ZoneSet:
     rule: str
     zones: Tuple[Zone, ...]
     geometry: Geometry
-    member: np.ndarray      # (N, 구역 수) 0/1
+    member: np.ndarray      # (N, n_zones) 0/1
 
     @property
     def names(self) -> List[str]:
         return [z.name for z in self.zones]
 
     def taxel_zone(self) -> np.ndarray:
-        """taxel마다 속한 구역 번호 (없으면 -1)."""
+        """Zone index of each taxel (-1 if none)."""
         out = np.full(self.geometry.n_taxels, NO_ZONE)
         for k, z in enumerate(self.zones):
             out[list(z.taxels)] = k
         return out
 
     def zone_sums(self, taxel_z: np.ndarray) -> np.ndarray:
-        """(n, N) taxel Z → (n, 구역 수) 구역별 합 (음수는 0)."""
+        """(n, N) taxel Z → (n, n_zones) per-zone sums (negatives as 0)."""
         w = np.clip(np.atleast_2d(np.asarray(taxel_z, dtype=float)), 0, None)
         return w @ self.member
 
     def classify(self, taxel_z: np.ndarray, min_taxel_sum: float) -> np.ndarray:
-        """(n, N) → (n,) 구역 번호. taxel Z 합 < min_taxel_sum 이거나 값이 없으면 -1."""
+        """(n, N) → (n,) zone index. -1 if the taxel Z sum < min_taxel_sum or values are missing."""
         tz = np.atleast_2d(np.asarray(taxel_z, dtype=float))
         bad = ~np.isfinite(tz).all(axis=1)
         tz = np.where(np.isfinite(tz), tz, 0.0)

@@ -1,9 +1,9 @@
-"""결과 그림 (계획 P6-3): matplotlib `Figure`를 만들어 파일(PNG)과 GUI에 같이 쓴다.
+"""Result figures (plan P6-3): build matplotlib `Figure`s used for both files (PNG) and the GUI.
 
-pyplot을 쓰지 않는다 (GUI 스레드·백엔드와 무관하게 만들기 위해 `Figure`를 직접 생성).
-theme: "light" = 파일·보고서용, "dark" = GUI용 (내용은 같고 색만 다름).
+pyplot is not used (`Figure` is created directly so it does not depend on the GUI thread or backend).
+theme: "light" = files and report, "dark" = GUI (same content, only colors differ).
 
-센서 그림은 위에서 본 모습 (x–y 투영, 오른쪽 = +x, 위 = +y = 둥근 끝).
+Sensor drawings are a top view (x–y projection, right = +x, up = +y = rounded tip).
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 import matplotlib
 import numpy as np
 import pandas as pd
-from matplotlib import cm, font_manager
+from matplotlib import cm
 from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 
@@ -21,41 +21,28 @@ from .zones import ZoneSet
 
 THEMES = {
     "light": {"bg": "#ffffff", "fg": "#222222", "muted": "#888888", "grid": "#dddddd", "surface": "#c8c8c8",
-              "point": "#1f77b4", "band": "#ff7f0e", "zero": "#444444", "thin": "#bbbbbb", "cmap": "viridis"},
+              "point": "#1f77b4", "band": "#ff7f0e", "zero": "#444444", "thin": "#bbbbbb", "cmap": "viridis",
+              "other": "#aaaaaa"},
     "dark": {"bg": "#1e1f22", "fg": "#dcdcdc", "muted": "#8a8a8a", "grid": "#3a3b3f", "surface": "#4a4b50",
-             "point": "#4fa3e0", "band": "#ffa040", "zero": "#bbbbbb", "thin": "#555555", "cmap": "viridis"},
+             "point": "#4fa3e0", "band": "#ffa040", "zero": "#bbbbbb", "thin": "#555555", "cmap": "viridis",
+             "other": "#6e6e6e"},
 }
-# 한글 글꼴: OS마다 있는 것 중 첫 번째 (없으면 기본 글꼴, 한글이 네모로 보임)
-KOREAN_FONTS = ["Malgun Gothic", "AppleGothic", "Apple SD Gothic Neo", "Noto Sans CJK KR", "Noto Sans KR",
-                "NanumGothic", "UnDotum"]
-
-
-def _setup_fonts() -> None:
-    have = {f.name for f in font_manager.fontManager.ttflist}
-    found = [n for n in KOREAN_FONTS if n in have]
-    if found:
-        matplotlib.rcParams["font.family"] = [found[0], "DejaVu Sans"]
-    matplotlib.rcParams["axes.unicode_minus"] = False
-
-
-_setup_fonts()
-
 ZONE_COLORS = ["#e6194b", "#3cb44b", "#4363d8", "#f58231", "#911eb4", "#42d4f4", "#f032e6", "#bfef45", "#9a6324"]
 
 
 def zone_color(zs: ZoneSet, k: int) -> str:
-    """구역 색은 격자 위치(행·열)로 정한다 (구역 수가 바뀌어도 같은 자리는 같은 색)."""
+    """Zone color follows the grid position (row, col), so the same place keeps its color if zones change."""
     z = zs.zones[k]
     return ZONE_COLORS[(z.row * 3 + z.col) % len(ZONE_COLORS)]
 
 
 def lag_text(sensor: Dict) -> str:
-    """센서 정보의 지연 표시: 잰 값, 상관, 분석에서 보정했는지."""
+    """Lag shown for a sensor: measured value, correlation, and whether the analysis corrected it."""
     lag = sensor.get("lag_s")
     if lag is None:
-        return "- (누름 변화가 적어 못 잼)"
+        return "- (too little force change to measure)"
     applied = sensor.get("lag_applied_s") or 0.0
-    return f"{lag * 1e3:+.0f} ms (r {sensor.get('lag_r'):.2f}, " + ("분석에서 보정)" if applied else "보정 안 함)")
+    return f"{lag * 1e3:+.0f} ms (r {sensor.get('lag_r'):.2f}, " + ("corrected)" if applied else "not corrected)")
 
 
 def _fig(w: float, h: float, theme: str) -> Figure:
@@ -83,8 +70,8 @@ def _fmt(v, unit: str = "", nd: int = 3) -> str:
 
 
 def error_limits(samples: pd.DataFrame, settings: Dict) -> tuple:
-    """모든 오차 그래프가 같이 쓰는 축 범위 (안정 샘플 기준)."""
-    st = samples[samples["stable"] == 1]
+    """Axis limits shared by all error plots (from contact samples, since every contact sample is plotted)."""
+    st = samples[samples["contact"] == 1]
     xmax = max(float(settings.get("max_N", 15)), float(st["gauge_N"].max()) if len(st) else 0.0) * 1.05
     e = st["error_N"].to_numpy(dtype=float)
     lim = max(0.5, float(np.percentile(np.abs(e), 99.5)) * 1.15) if len(e) else 1.0
@@ -93,56 +80,77 @@ def error_limits(samples: pd.DataFrame, settings: Dict) -> tuple:
 
 def draw_error(ax, samples: pd.DataFrame, settings: Dict, theme: str, xlim=None, ylim=None,
                title: Optional[str] = None, small: bool = False) -> None:
-    """오차 그래프: x = 게이지 N, y = |F| − 게이지 N. 안정 샘플 점 + 구간 평균 ±1 SD 띠 + 0 선."""
+    """Error plot: x = gauge N, y = |F| − gauge N. Zero line + every contact sample (not stable = gray, stable = blue)
+    + binned mean ±1 SD band of stable samples (orange) + binned mean of all contact samples (dashed)
+    (user decision 2026-10-06)."""
     t = THEMES[theme]
     _style(ax, theme)
-    st = samples[samples["stable"] == 1]
-    g = st["gauge_N"].to_numpy(dtype=float)
-    e = st["error_N"].to_numpy(dtype=float)
+    ct = samples[samples["contact"] == 1]
+    on = ct["stable"].to_numpy() == 1
+    g = ct["gauge_N"].to_numpy(dtype=float)
+    e = ct["error_N"].to_numpy(dtype=float)
+    size = 4 if small else 6
     ax.axhline(0, color=t["zero"], linewidth=0.8)
-    ax.scatter(g, e, s=4 if small else 6, color=t["point"], alpha=0.25 if len(g) > 300 else 0.45,
-               linewidths=0, rasterized=True)
-    c, m, sd, _ = binned(g, e, float(settings.get("bin_N", 1.0)))
+    ax.scatter(g[~on], e[~on], s=size, color=t["other"], alpha=0.3, linewidths=0, rasterized=True,
+               label="Not stable")
+    ax.scatter(g[on], e[on], s=size, color=t["point"], alpha=0.4 if on.sum() > 300 else 0.6, linewidths=0,
+               rasterized=True, label="Stable")
+    bin_N = float(settings.get("bin_N", 1.0))
+    c, m, sd, _ = binned(g[on], e[on], bin_N)
     if len(c):
         ax.fill_between(c, m - sd, m + sd, color=t["band"], alpha=0.25, linewidth=0)
-        ax.plot(c, m, color=t["band"], linewidth=1.6 if not small else 1.2, marker="o", markersize=2.5)
+        ax.plot(c, m, color=t["band"], linewidth=1.6 if not small else 1.2, marker="o", markersize=2.5,
+                label="Stable mean ±1 SD")
+    c, m, _, _ = binned(g, e, bin_N)
+    if len(c):
+        ax.plot(c, m, color=t["fg"], linewidth=1.2 if not small else 0.9, linestyle="--", alpha=0.8,
+                label="All contact mean")
     if xlim:
         ax.set_xlim(*xlim)
     if ylim:
         ax.set_ylim(*ylim)
     if not small:
-        ax.set_xlabel("게이지 (N)")
-        ax.set_ylabel("오차 |F| − 게이지 (N)")
+        ax.set_xlabel("Gauge (N)")
+        ax.set_ylabel("Error |F| − gauge (N)")
+        leg = ax.legend(loc="best", fontsize=8, frameon=True, markerscale=2.5, facecolor=t["bg"], edgecolor=t["grid"],
+                        labelcolor=t["fg"])
+        for h in leg.legend_handles:
+            h.set_alpha(1.0)
     if title:
         ax.set_title(title, fontsize=9 if small else 11)
 
 
 def _metrics_text(row: Dict, result: Dict, sensor: Optional[Dict]) -> str:
     lines = [
-        f"안정 샘플 n = {row.get('n', 0)}",
-        f"게이지 범위 {_fmt(row.get('gauge_min_N'), '', 1)} ~ {_fmt(row.get('gauge_max_N'), ' N', 1)}",
+        f"Stable samples n = {row.get('n', 0)}",
+        f"Gauge range {_fmt(row.get('gauge_min_N'), '', 1)} – {_fmt(row.get('gauge_max_N'), ' N', 1)}",
         f"bias {_fmt(row.get('bias_N'), ' N')}",
         f"SD {_fmt(row.get('sd_N'), ' N')}",
         f"RMSE {_fmt(row.get('rmse_N'), ' N')}  ({_fmt(row.get('rmse_pct_fs'), ' %FS', 2)})",
         f"MAE {_fmt(row.get('mae_N'), ' N')}",
         f"P95 |e| {_fmt(row.get('p95_abs_N'), ' N')}",
-        f"최대 |e| {_fmt(row.get('max_abs_N'), ' N')}",
-        f"|F| = {_fmt(row.get('slope'), '', 4)}·게이지 {'+' if (row.get('intercept') or 0) >= 0 else '−'} "
+        f"Max |e| {_fmt(row.get('max_abs_N'), ' N')}",
+        f"|F| = {_fmt(row.get('slope'), '', 4)}·gauge {'+' if (row.get('intercept') or 0) >= 0 else '−'} "
         f"{_fmt(abs(row.get('intercept') or 0), ' N')}",
         f"R² {_fmt(row.get('r2'), '', 5)}",
+        f"Z only: bias {_fmt(row.get('bias_z_N'), ' N')}, RMSE {_fmt(row.get('rmse_z_N'), ' N')}",
         "",
-        f"접촉 샘플 n = {row.get('n_contact', 0)}, RMSE {_fmt(row.get('rmse_contact_N'), ' N')}",
-        f"Z만: bias {_fmt(row.get('bias_z_N'), ' N')}, RMSE {_fmt(row.get('rmse_z_N'), ' N')}",
+        f"All contact samples n = {row.get('n_contact', 0)}",
+        f"bias {_fmt(row.get('bias_contact_N'), ' N')}",
+        f"SD {_fmt(row.get('sd_contact_N'), ' N')}",
+        f"RMSE {_fmt(row.get('rmse_contact_N'), ' N')}",
+        "",
     ]
     if row.get("n_noload") is not None:
-        lines.append(f"무부하 잔류 |F| 평균 {_fmt(row.get('noload_mean_N'), ' N')}, 최대 {_fmt(row.get('noload_max_N'), ' N')}")
+        lines.append(f"No-load residual |F| mean {_fmt(row.get('noload_mean_N'), ' N')}, "
+                     f"max {_fmt(row.get('noload_max_N'), ' N')}")
     if sensor is not None:
-        lines.append("남은 지연(센서−게이지) " + lag_text(sensor))
+        lines.append("Residual lag (sensor − gauge) " + lag_text(sensor))
     return "\n".join(lines)
 
 
 def overall_error_figure(samples: pd.DataFrame, row: Dict, result: Dict, sensor: Optional[Dict] = None,
-                         theme: str = "light", title: str = "전체 오차") -> Figure:
+                         theme: str = "light", title: str = "Overall error") -> Figure:
     t = THEMES[theme]
     f = _fig(10, 5.2, theme)
     gs = f.add_gridspec(1, 2, width_ratios=[2.3, 1])
@@ -160,7 +168,7 @@ def overall_error_figure(samples: pd.DataFrame, row: Dict, result: Dict, sensor:
 def draw_sensor(ax, zs: ZoneSet, theme: str, *, highlight: Optional[int] = None,
                 zone_values: Optional[np.ndarray] = None, vmin=None, vmax=None, labels: bool = False,
                 label_text: Optional[List[str]] = None, taxel_size: float = 30, cop=None, thin=None) -> None:
-    """센서 그림: 표면 점(회색) + taxel (구역 색 / 값 색 / 강조)."""
+    """Sensor drawing: surface points (gray) + taxels (zone color / value color / highlight)."""
     t = THEMES[theme]
     g = zs.geometry
     ax.set_facecolor(t["bg"])
@@ -200,8 +208,8 @@ def draw_sensor(ax, zs: ZoneSet, theme: str, *, highlight: Optional[int] = None,
 
 
 def zone_map_figure(zs: ZoneSet, samples: pd.DataFrame, zone_rows: pd.DataFrame, theme: str = "light",
-                    title: str = "구역별 RMSE") -> Figure:
-    """센서 그림 위에 구역별 색 = RMSE (데이터 부족 구역은 흐리게), CoP 샘플 점."""
+                    title: str = "RMSE by zone") -> Figure:
+    """Sensor drawing colored by zone RMSE (zones without enough data are faded), plus CoP sample points."""
     t = THEMES[theme]
     f = _fig(6.5, 7, theme)
     ax = f.add_subplot(1, 1, 1)
@@ -222,13 +230,14 @@ def zone_map_figure(zs: ZoneSet, samples: pd.DataFrame, zone_rows: pd.DataFrame,
     cb = f.colorbar(sm, ax=ax, shrink=0.6)
     cb.set_label("RMSE (N)", color=t["fg"])
     cb.ax.tick_params(colors=t["fg"], labelsize=8)
-    ax.set_title(title + "  (회색 = 데이터 부족, 점 = 안정 샘플 CoP)", color=t["fg"], fontsize=10)
+    ax.set_title(title + "  (gray = not enough data, dots = CoP of stable samples)", color=t["fg"], fontsize=10)
     return f
 
 
 def zones_figure(zs: ZoneSet, samples: pd.DataFrame, zone_rows: pd.DataFrame, settings: Dict,
-                 theme: str = "light", title: str = "구역별 오차") -> Figure:
-    """구역별 오차 그래프 격자 (구역의 행·열 자리, 빈 자리는 비움). 칸마다 [작은 센서 그림(구역 강조) | 오차 그래프], 축 범위 공통."""
+                 theme: str = "light", title: str = "Error by zone") -> Figure:
+    """Grid of per-zone error plots (at each zone's row/col, empty cells left blank).
+    Each cell is [small sensor drawing (zone highlighted) | error plot], with shared axis limits."""
     t = THEMES[theme]
     rows = max(z.row for z in zs.zones) + 1
     ncol = max(z.col for z in zs.zones) + 1
@@ -243,22 +252,25 @@ def zones_figure(zs: ZoneSet, samples: pd.DataFrame, zone_rows: pd.DataFrame, se
         a1 = f.add_subplot(inner[0, 1])
         r = by_id.get(z.id, {})
         sub = samples[samples["zone"] == z.id]
-        tt = f"{z.name}  n {r.get('n', 0)}  bias {_fmt(r.get('bias_N'), '', 2)}  RMSE {_fmt(r.get('rmse_N'), '', 2)}"
+        tt = (f"{z.name}  (stable / all contact)\nn {r.get('n', 0)} / {r.get('n_contact', 0)}  "
+              f"bias {_fmt(r.get('bias_N'), '', 2)} / {_fmt(r.get('bias_contact_N'), '', 2)}  "
+              f"RMSE {_fmt(r.get('rmse_N'), '', 2)} / {_fmt(r.get('rmse_contact_N'), '', 2)}")
         draw_error(a1, sub, settings, theme, xlim, ylim, title=tt, small=True)
         if not r.get("enough", False):
-            a1.text(0.5, 0.5, "데이터 부족", transform=a1.transAxes, ha="center", va="center",
+            a1.text(0.5, 0.5, "Not enough data", transform=a1.transAxes, ha="center", va="center",
                     color=t["muted"], fontsize=12, alpha=0.8)
-    f.suptitle(title + "  (x = 게이지 N, y = 오차 N, 모든 칸 같은 축)", color=t["fg"], fontsize=11)
+    f.suptitle(title + "  (x = gauge N, y = error N, same axes in every panel; blue = stable, gray = not stable, "
+               "orange = stable mean ±1 SD, dashed = all contact mean)", color=t["fg"], fontsize=11)
     return f
 
 
 def sensors_compare_figure(sensor_rows: pd.DataFrame, theme: str = "light") -> Figure:
-    """HAND: 센서별 bias·RMSE·기울기 막대."""
+    """HAND: bias, RMSE and slope bars per sensor."""
     t = THEMES[theme]
     f = _fig(10, 3.6, theme)
     labels = list(sensor_rows["name"])
     x = np.arange(len(labels))
-    for i, (col, name) in enumerate((("bias_N", "bias (N)"), ("rmse_N", "RMSE (N)"), ("slope", "기울기 a"))):
+    for i, (col, name) in enumerate((("bias_N", "bias (N)"), ("rmse_N", "RMSE (N)"), ("slope", "Slope a"))):
         ax = f.add_subplot(1, 3, i + 1)
         _style(ax, theme)
         v = pd.to_numeric(sensor_rows[col], errors="coerce").to_numpy(dtype=float)
@@ -271,7 +283,7 @@ def sensors_compare_figure(sensor_rows: pd.DataFrame, theme: str = "light") -> F
 
 
 def crosstalk_figure(ct: pd.DataFrame, labels: List[str], theme: str = "light") -> Figure:
-    """HAND: 누른 센서(행) × 다른 센서(열)의 |F| P95 / 누른 센서 |F| (%)."""
+    """HAND: pressed sensor (row) × other sensor (col), other |F| P95 / pressed sensor |F| (%)."""
     t = THEMES[theme]
     f = _fig(5.5, 4.6, theme)
     ax = f.add_subplot(1, 1, 1)
@@ -288,17 +300,17 @@ def crosstalk_figure(ct: pd.DataFrame, labels: List[str], theme: str = "light") 
                     fontsize=9)
     ax.set_xticks(range(n), labels)
     ax.set_yticks(range(n), labels)
-    ax.set_xlabel("다른 센서", color=t["fg"])
-    ax.set_ylabel("누른 센서", color=t["fg"])
+    ax.set_xlabel("Other sensor", color=t["fg"])
+    ax.set_ylabel("Pressed sensor", color=t["fg"])
     ax.tick_params(colors=t["fg"])
     ax.set_facecolor(t["bg"])
-    ax.set_title("간섭: 다른 센서 |F| P95 / 누른 센서 |F|", color=t["fg"], fontsize=10)
+    ax.set_title("Crosstalk: other sensor |F| P95 / pressed sensor |F|", color=t["fg"], fontsize=10)
     f.colorbar(im, ax=ax, shrink=0.8).ax.tick_params(colors=t["fg"])
     return f
 
 
 def zone_check_figure(zs: ZoneSet, theme: str = "light") -> Figure:
-    """구역 정의 확인용: taxel 번호와 구역 색, 구역 이름."""
+    """Zone definition check: taxel indices, zone colors and zone names."""
     t = THEMES[theme]
     f = _fig(7.6, 8, theme)
     ax = f.add_subplot(1, 1, 1)
@@ -310,6 +322,6 @@ def zone_check_figure(zs: ZoneSet, theme: str = "light") -> Figure:
                for k, z in enumerate(zs.zones)]
     ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.0, 1.0), fontsize=8, frameon=False,
               labelcolor=t["fg"])
-    ax.set_title(f"{zs.model} 구역 (위에서 본 모습, 위 = 둥근 끝, 오른쪽 = +x)", color=t["fg"], fontsize=10)
+    ax.set_title(f"{zs.model} zones (top view, up = rounded tip, right = +x)", color=t["fg"], fontsize=10)
     f.text(0.02, 0.01, zs.rule, color=t["muted"], fontsize=7, wrap=True)
     return f

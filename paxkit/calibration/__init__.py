@@ -1,4 +1,4 @@
-"""캘리브레이션 (계획 P4). 명령 전송은 리더가 PXSR과 같게 처리하고, 여기서는 실행·결과 기록만 한다."""
+"""Calibration (plan P4). The reader sends commands exactly as PXSR does; this package only records runs and results."""
 from .run import (OUTCOME_TEXT, CalibrationResult, CalibrationRun, append_history, history_path,
                   read_history)
 

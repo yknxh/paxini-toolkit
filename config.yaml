@@ -1,11 +1,11 @@
-# paxkit 설정. 상대경로는 이 파일 기준.
+# paxkit settings. Relative paths are relative to this file.
 
-# ── Paxini 센서 ───────────────────────────────────────────────────
-# baudrate는 PXSR 코드에 고정된 값(USB·HAND 921600)을 코드에서 쓰므로 여기서 바꾸지 않는다.
+# ── Paxini sensor ───────────────────────────────────────────────────
+# baudrate is the value fixed in PXSR code (USB/HAND 921600), used from code, so it is not set here.
 device:
-  mode: usb                # usb (센서 1개 직결) | hand (손 보드, 미구현)
-  port: ""                 # 비우면 CH343 포트를 자동 선택. 예: COM3, /dev/ttyUSB0
-  stall_s: 1.0             # 이보다 오래 프레임이 없으면 수신 멈춤 알림 + 기록 정지 (PXSR에 없음, 다시 요청하지는 않음)
+  mode: usb                # usb (single sensor, direct) | hand (hand board, not implemented)
+  port: ""                 # empty = auto-select the CH343 port. e.g. COM3, /dev/ttyUSB0
+  stall_s: 1.0             # no frame for longer than this → stall alert + stop recording (not in PXSR; no re-request)
 
 sensor_types:
   A:
@@ -17,44 +17,44 @@ sensor_types:
     taxels: 52
     rated_N: 25
 
-# ── Force gauge (ZP-500N, 시리얼) — paxtest config.yaml 실측값 그대로 ──
+# ── Force gauge (ZP-500N, serial) — measured values from paxtest config.yaml as-is ──
 gauge:
-  port: COM7               # FTDI USB Serial Port (2026-09-29 확인)
-  baudrate: 2400           # 실측. 8N1
-  mode: stream             # poll: 명령 보내고 응답 읽기 | stream: 게이지가 연속 송신 (실측: 약 10 Hz)
-  poll_command: "D\r"      # poll 모드에서만 사용
+  port: COM7               # FTDI USB Serial Port (confirmed 2026-09-29)
+  baudrate: 2400           # measured. 8N1
+  mode: stream             # poll: send a command, read the response | stream: gauge sends continuously (measured: ~10 Hz)
+  poll_command: "D\r"      # poll mode only
   poll_hz: 50
-  line_terminator: ""      # 실측: 구분자 없음 ("0000.0-000.3-004.9...") → record_regex 로 자른다
-  # 레코드 한 개. N 단위 실측은 고정폭 6글자, 첫 글자가 부호 자리('-' 또는 '0'), 소수 1자리.
-  # 게이지 단위를 kgf 로 바꾸면 "-00.00" 형식이 되므로 "[-+ \\d]\\d{2}\\.\\d{2}" 로 바꾼다.
+  line_terminator: ""      # measured: no delimiter ("0000.0-000.3-004.9...") → split with record_regex
+  # One record. Measured in N: fixed width 6 chars, first char is the sign position ('-' or '0'), 1 decimal place.
+  # If the gauge unit is set to kgf, the format becomes "-00.00", so change this to "[-+ \\d]\\d{2}\\.\\d{2}".
   record_regex: "[-+ \\d]\\d{3}\\.\\d"
-  record_len: 6            # 레코드 글자 수. 버퍼 끝의 레코드가 이 길이면 다음 레코드를 기다리지 않고 바로 쓴다
-  line_regex: "([-+]?\\d+(?:\\.\\d+)?)"   # 응답에서 숫자 추출 (첫 그룹)
-  unit_scale: 1.0          # 게이지 단위 → N (kgf면 9.80665). 게이지 표시 단위는 N 으로 설정해 둠
-  invert: true             # 압축(누름)이 + 가 되도록. 실측: 누르면 '-' 로 온다
+  record_len: 6            # record length (chars). A record of this length at the buffer end is used right away without waiting for the next one
+  line_regex: "([-+]?\\d+(?:\\.\\d+)?)"   # extracts the number from the response (first group)
+  unit_scale: 1.0          # gauge unit → N (9.80665 for kgf). The gauge display unit is set to N
+  invert: true             # so that compression (pressing) is +. Measured: pressing arrives as '-'
   timeout_s: 0.2
-  # 수신 시각에서 뺄 고정 지연 (s). 레코드 전송 시간(6바이트 = 25 ms)은 코드가 따로 뺀다.
-  # 0.025 = 실측 지연(센서−게이지) −50 ms (2026-10-05, 보정 전) − 전송 25 ms. 다시 재려면 tools/gauge_live_check.py --sensor
+  # fixed latency (s) subtracted from the receive time. Record transmission time (6 bytes = 25 ms) is subtracted separately in code.
+  # 0.025 = measured lag (sensor−gauge) −50 ms (2026-10-05, before correction) − 25 ms transmission. To re-measure: tools/gauge_live_check.py --sensor
   latency_s: 0.025
-  accuracy_N: 0.1          # ± 정확도 (참고). 실측: 0.5 kg 분동 → 4.9 N (기준 4.90 N), 분해능 0.1 N 이내
+  accuracy_N: 0.1          # ± accuracy (reference). Measured: 0.5 kg weight → 4.9 N (expected 4.90 N), within the 0.1 N resolution
 
-# ── 게이지 테스트 (bench, 계획 P6-4) — 값은 초안, 실기 데이터로 조정 ──
-# 세션마다 meta.json에 복사되고, 재분석은 기본으로 그 값을 쓴다.
+# ── Gauge test (bench, plan P6-4) — draft values, to be tuned with real data ──
+# Copied into meta.json for each session; re-analysis uses those values by default.
 bench:
-  max_N: 15                 # 안내 범위·힘 막대 경고선
-  contact_N: 0.5            # 접촉 판정 (게이지)
-  noload_N: 0.2             # 무부하 판정 (게이지)
-  noload_warn_N: 0.3        # 무부하 확인 경고
-  noload_check_s: 3.0       # 무부하 확인 시간
-  stable_window_s: 0.2      # 안정 판정: ± 이 시간 안의 기울기
+  max_N: 15                 # guidance range, force bar warning line
+  contact_N: 0.5            # contact threshold (gauge)
+  noload_N: 0.2             # no-load threshold (gauge)
+  noload_warn_N: 0.3        # no-load check warning
+  noload_check_s: 3.0       # no-load check duration
+  stable_window_s: 0.2      # stability: slope within ± this time
   stable_slope_N_per_s: 2.0
-  max_gap_s: 0.1            # 짝짓기 보간 허용 간격 (센서 앞뒤 프레임)
-  gauge_max_N: 100          # 게이지 이상값 제외
-  min_taxel_sum: 5          # raw, 이보다 작으면 위치 없음
-  bin_N: 1.0                # 오차 그래프 구간
-  zone_min_samples: 20      # 구역 "충분" 판정 (안정 샘플 수)
-  lag_warn_s: 0.1           # 남은 |지연|이 이보다 크면 경고 (게이지 latency_s를 다시 잴 때)
-  lag_correct: true         # 세션마다 남은 지연을 상호상관으로 재서 짝짓기 전에 보정 (2026-10-05 사용자 요청)
-  lag_min_r: 0.8            # 상관이 이보다 낮으면 보정하지 않음
-  simultaneous_ratio: 0.5   # HAND 동시 접촉 판정
-  hand_order: [A1, A2, B1, B2]   # HAND 누르는 순서. 라벨 ↔ 채널·슬롯은 P1b 후 추가
+  max_gap_s: 0.1            # max interpolation gap for pairing (sensor frames before/after)
+  gauge_max_N: 100          # exclude gauge outliers
+  min_taxel_sum: 5          # raw; below this, no position
+  bin_N: 1.0                # error plot bin
+  zone_min_samples: 20      # zone "enough" threshold (stable sample count)
+  lag_warn_s: 0.1           # warn if the remaining |lag| exceeds this (time to re-measure gauge latency_s)
+  lag_correct: true         # measure the remaining lag per session by cross-correlation and correct before pairing (2026-10-05 user request)
+  lag_min_r: 0.8            # no correction if the correlation is below this
+  simultaneous_ratio: 0.5   # HAND simultaneous contact threshold
+  hand_order: [A1, A2, B1, B2]   # HAND press order. Label ↔ channel/slot to be added after P1b

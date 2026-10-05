@@ -1,14 +1,14 @@
-"""PXSR 번들에서 센서 점 모델을 꺼내 `paxkit/device/geometry/<label>.json`으로 저장한다 (계획 P6-3).
+"""Extract sensor point models from the PXSR bundle and save them as `paxkit/device/geometry/<label>.json` (plan P6-3).
 
     python tools/extract_geometry.py [--bundle PATH]
 
-PXSR 3D 화면이 쓰는 점 모델 `j4` 맵 (`j4.set("S1813E", ov0)`, `j4.set("S2015", sv0)`, ~4549551):
-- `{position:[x,y,z], idx:i}` = taxel i의 위치 (mm).
-- `{position:[x,y,z], neighbor:[a,b,c,d], shape:[wa,wb,wc,wd]}` = 표면 점. PXSR은 이웃 taxel 4개 값에
-  shape 가중치를 곱해 더한 값으로 이 점을 칠한다.
-- taxel 힘 표시용 회전 (`calculation`: S1813E `nv0`/`B6`, S2015 `rv0`/`U6`): taxel마다 3×3 (열 우선 9개).
+Point model map `j4` used by the PXSR 3D view (`j4.set("S1813E", ov0)`, `j4.set("S2015", sv0)`, ~4549551):
+- `{position:[x,y,z], idx:i}` = position of taxel i (mm).
+- `{position:[x,y,z], neighbor:[a,b,c,d], shape:[wa,wb,wc,wd]}` = surface point. PXSR colors it with the sum of
+  the 4 neighbor taxel values times the shape weights.
+- Rotation for taxel force display (`calculation`: S1813E `nv0`/`B6`, S2015 `rv0`/`U6`): 3×3 per taxel (9 values, column-major).
 
-값은 번들의 숫자 그대로 옮긴다 (JS 숫자 리터럴 → float).
+Values are copied verbatim from the bundle's numbers (JS number literal → float).
 """
 from __future__ import annotations
 
@@ -26,12 +26,12 @@ NUM = r"-?(?:\d+\.?\d*|\.\d+)(?:e-?\d+)?"
 
 
 def _array_at(text: str, name: str):
-    """`name=[ ... ]`의 대괄호 짝을 맞춰 배열 원문과 시작 offset을 돌려준다."""
+    """Match the brackets of `name=[ ... ]` and return the array source text and its start offset."""
     i = text.find(name + "=[")
     if i < 0 or not re.match(r"[,;\s(]", text[i - 1]):
         i = text.find("," + name + "=[") + 1
     if i <= 0:
-        raise ValueError(f"{name} 없음")
+        raise ValueError(f"{name} not found")
     k0 = i + len(name) + 1
     depth = 0
     for k in range(k0, len(text)):
@@ -42,7 +42,7 @@ def _array_at(text: str, name: str):
             depth -= 1
             if depth == 0:
                 return text[k0:k + 1], i
-    raise ValueError(f"{name} 끝 없음")
+    raise ValueError(f"end of {name} not found")
 
 
 def _nums(s: str):
@@ -68,7 +68,7 @@ def extract(text: str, label: str, points: str, rot: str) -> dict:
     return {
         "model": label,
         "source": f"pxsr-gen3 v1.0.7 dist/index.3bcb906d.js: j4.set(\"{label}\", {points}) "
-                  f"({points} ~{off}, j4 ~{m.start() if m else '?'}), 회전 {rot} ~{roff} (열 우선 3x3)",
+                  f"({points} ~{off}, j4 ~{m.start() if m else '?'}), rotation {rot} ~{roff} (column-major 3x3)",
         "units": "mm",
         "taxels_mm": [taxels[i] for i in range(n)],
         "surface": surface,
@@ -86,7 +86,7 @@ def main() -> int:
         doc = extract(text, label, points, rot)
         path = OUT_DIR / f"{label}.json"
         path.write_bytes(json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
-        print(f"{label}: taxel {len(doc['taxels_mm'])}, 표면 점 {len(doc['surface'])} -> {path}")
+        print(f"{label}: taxel {len(doc['taxels_mm'])}, surface points {len(doc['surface'])} -> {path}")
     return 0
 
 

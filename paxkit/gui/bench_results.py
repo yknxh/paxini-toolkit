@@ -1,7 +1,7 @@
-"""결과 탭 (계획 P6-5 6, P7): 게이지 테스트 결과 보기 + 지난 세션 목록 + 로깅 파일 목록.
+"""Results tab (plan P6-5 6, P7): gauge-test result view + past session list + logging file list.
 
-그림은 분석 결과 파일(`result.json`, `samples.csv`)에서 어두운 테마로 다시 그린다 (파일의 PNG는 밝은 테마, 내용은 같음).
-재분석은 기록 파일만 읽어 결과를 덮어쓴다 (`tools/bench_analyze.py`와 같은 코드).
+Figures are redrawn in the dark theme from the analysis result files (`result.json`, `samples.csv`) (the saved PNGs use the light theme, same content).
+Re-analysis reads only the recorded files and overwrites the results (same code as `tools/bench_analyze.py`).
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from ..bench.report import METRIC_LABELS, figures
 from ..paths import data_path
 from . import theme
 
-STATUS_TEXT = {"stopped": "", "cancelled": " · 취소됨", "recording": " · 기록 중/중단됨"}
+STATUS_TEXT = {"stopped": "", "cancelled": " · cancelled", "recording": " · recording/interrupted"}
 
 
 def list_sessions(root: Path) -> List[Path]:
@@ -35,7 +35,7 @@ def _fmt(v) -> str:
     if v is None:
         return "-"
     if isinstance(v, bool):
-        return "충분" if v else "부족"
+        return "enough" if v else "too few"
     if isinstance(v, float):
         return "-" if v != v else f"{v:.3f}"
     return str(v)
@@ -54,11 +54,11 @@ class BenchResults(QWidget):
 
         self.sessions = QListWidget()
         self.sessions.currentItemChanged.connect(lambda cur, _prev: self._select(cur))
-        refresh = QPushButton("새로고침")
+        refresh = QPushButton("Refresh")
         refresh.clicked.connect(self.refresh)
-        self.reanalyze_btn = QPushButton("재분석")
+        self.reanalyze_btn = QPushButton("Re-analyze")
         self.reanalyze_btn.clicked.connect(self.reanalyze)
-        self.folder_btn = QPushButton("폴더 열기")
+        self.folder_btn = QPushButton("Open folder")
         self.folder_btn.clicked.connect(lambda: self._open(self._current()))
         self.report_btn = QPushButton("report.html")
         self.report_btn.clicked.connect(lambda: self._open(self._current() / "report.html" if self._current() else None))
@@ -69,19 +69,19 @@ class BenchResults(QWidget):
         b2.addWidget(self.folder_btn)
         b2.addWidget(self.report_btn)
         self.logs = QListWidget()
-        self.logs.setToolTip("더블클릭: 폴더 열기")
+        self.logs.setToolTip("Double-click: open folder")
         self.logs.itemDoubleClicked.connect(lambda it: self._open(Path(it.data(Qt.UserRole)).parent))
         left = QWidget()
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
-        ll.addWidget(QLabel("게이지 테스트 세션 (data/bench)"))
+        ll.addWidget(QLabel("Gauge test sessions (data/bench)"))
         ll.addWidget(self.sessions, 3)
         ll.addLayout(b1)
         ll.addLayout(b2)
-        ll.addWidget(QLabel("데이터 로깅 파일 (data/logs)"))
+        ll.addWidget(QLabel("Data logging files (data/logs)"))
         ll.addWidget(self.logs, 1)
 
-        self.summary = QLabel("세션을 고르세요")
+        self.summary = QLabel("Select a session")
         self.summary.setWordWrap(True)
         self.summary.setTextFormat(Qt.RichText)
         self.table = QTableWidget(0, len(METRIC_LABELS))
@@ -107,10 +107,10 @@ class BenchResults(QWidget):
         lay = QVBoxLayout(self)
         lay.addWidget(split)
         self._reanalyzed.connect(self.show_result)
-        self._failed.connect(lambda m: self.summary.setText(f"<span style='color:{theme.BAD}'>분석 실패: {m}</span>"))
+        self._failed.connect(lambda m: self.summary.setText(f"<span style='color:{theme.BAD}'>Analysis failed: {m}</span>"))
         self.refresh()
 
-    # ── 목록 ──
+    # ── lists ──
     def _root(self) -> Path:
         return self.root or data_path("bench")
 
@@ -121,7 +121,7 @@ class BenchResults(QWidget):
         for p in list_sessions(self._root()):
             meta = read_meta(p)
             done = (p / "result.json").is_file()
-            text = p.name + STATUS_TEXT.get(meta.get("status", ""), "") + ("" if done else " · 미분석")
+            text = p.name + STATUS_TEXT.get(meta.get("status", ""), "") + ("" if done else " · not analyzed")
             it = QListWidgetItem(text)
             it.setData(Qt.UserRole, str(p))
             if not done:
@@ -151,8 +151,8 @@ class BenchResults(QWidget):
         if res is None:
             self._clear()
             meta = read_meta(folder)
-            self.summary.setText(f"<b>{folder.name}</b><br>분석 결과 없음 (상태 {meta.get('status', '-')}). "
-                                 "\"재분석\"으로 기록 파일을 분석합니다.")
+            self.summary.setText(f"<b>{folder.name}</b><br>No analysis result (status {meta.get('status', '-')}). "
+                                 "\"Re-analyze\" analyzes the recorded files.")
             return
         self.show_result(res, refresh=False)
 
@@ -162,7 +162,7 @@ class BenchResults(QWidget):
         self.folder_btn.setEnabled(cur is not None)
         self.report_btn.setEnabled(cur is not None and (cur / "report.html").is_file())
 
-    # ── 보기 ──
+    # ── view ──
     def _clear(self) -> None:
         self.result = None
         self.table.setRowCount(0)
@@ -180,24 +180,26 @@ class BenchResults(QWidget):
         r = res.result
         c = r["counts"]
         sens = "; ".join(
-            f"{s['label']} {s.get('model')} {s['rate_hz']} Hz, 남은 지연 {lag_text(s)}" for s in r["sensors"])
+            f"{s['label']} {s.get('model')} {s['rate_hz']} Hz, residual lag {lag_text(s)}" for s in r["sensors"])
         warn = "".join(f"<li>{w}</li>" for w in r["warnings"])
         nl = r.get("noload_check") or {}
         m = res.metrics.iloc[0].to_dict() if len(res.metrics) else {}
         self.summary.setText(
-            f"<b>{res.folder.name}</b> — 기록 {r.get('duration_s')} s, 게이지 샘플 {c['gauge_samples']}, "
-            f"안정 {c['stable']}, 접촉 {c['contact']}<br>{sens}<br>"
-            f"<b>전체 (안정 샘플): bias {_fmt(m.get('bias_N'))} N, RMSE {_fmt(m.get('rmse_N'))} N "
-            f"({_fmt(m.get('rmse_pct_fs'))} %FS), 기울기 {_fmt(m.get('slope'))}, R² {_fmt(m.get('r2'))}</b> "
-            f"— 합격/불합격 판정 없음<br>"
-            + (f"무부하 확인: 게이지 {nl.get('gauge_mean_N')} N, 센서 |F| {nl.get('sensor_F_mean_N')} N<br>" if nl else
-               "무부하 확인: 기록 없음<br>")
-            + (f"<span style='color:{theme.WARN}'>경고</span><ul style='margin:0'>{warn}</ul>" if warn else ""))
+            f"<b>{res.folder.name}</b> — recorded {r.get('duration_s')} s, gauge samples {c['gauge_samples']}, "
+            f"stable {c['stable']}, contact {c['contact']}<br>{sens}<br>"
+            f"<b>Overall (stable samples): bias {_fmt(m.get('bias_N'))} N, RMSE {_fmt(m.get('rmse_N'))} N "
+            f"({_fmt(m.get('rmse_pct_fs'))} %FS), slope {_fmt(m.get('slope'))}, R² {_fmt(m.get('r2'))}</b> "
+            f"— no pass/fail verdict<br>"
+            f"<b>Overall (all contact samples): bias {_fmt(m.get('bias_contact_N'))} N, SD {_fmt(m.get('sd_contact_N'))} N, "
+            f"RMSE {_fmt(m.get('rmse_contact_N'))} N</b><br>"
+            + (f"No-load check: gauge {nl.get('gauge_mean_N')} N, sensor |F| {nl.get('sensor_F_mean_N')} N<br>" if nl else
+               "No-load check: not done<br>")
+            + (f"<span style='color:{theme.WARN}'>Warnings</span><ul style='margin:0'>{warn}</ul>" if warn else ""))
         self._fill_table(res)
         for rel, title, fig in figures(res, "dark"):
             canvas = FigureCanvasQTAgg(fig)
             w, h = fig.get_size_inches() * fig.dpi
-            canvas.setMinimumSize(int(w * 0.55), int(h * 0.7))   # 폭은 화면에 맞추고, 작으면 스크롤
+            canvas.setMinimumSize(int(w * 0.55), int(h * 0.7))   # width fits the view; scrolls if too small
             area = QScrollArea()
             area.setWidget(canvas)
             area.setWidgetResizable(True)
@@ -228,12 +230,12 @@ class BenchResults(QWidget):
                 self.table.setItem(i, j, it)
         self.table.resizeColumnsToContents()
 
-    # ── 버튼 ──
+    # ── buttons ──
     def reanalyze(self) -> None:
         folder = self._current()
         if folder is None:
             return
-        self.summary.setText(f"<b>{folder.name}</b> 분석 중…")
+        self.summary.setText(f"<b>{folder.name}</b> analyzing…")
         self.reanalyze_btn.setEnabled(False)
 
         def work():

@@ -1,8 +1,8 @@
-"""알려진 오차를 넣은 합성 게이지 테스트 세션 (계획 P6-6 검증용).
+"""Synthetic gauge test session with known errors (for plan P6-6 verification).
 
-센서 CSV는 실제 기록과 같은 `CsvRecorder`로 쓴다 (PXSR 형식). 하중 L(t)는 누름마다 위치(taxel 중심)와 힘이 바뀌는
-사다리꼴 (올림 0.6 s · 유지 1.2 s · 내림 0.6 s · 쉼 0.6 s).
-센서 |F| = gain·L + bias (+ zone_bias_N, 그 구역을 누를 때), 무부하는 residual_N, 센서 시각은 delay_s 만큼 늦음.
+The sensor CSV is written with the same `CsvRecorder` as real recordings (PXSR format). The load L(t) is a trapezoid whose
+position (taxel center) and force change with each press (ramp up 0.6 s · hold 1.2 s · ramp down 0.6 s · rest 0.6 s).
+Sensor |F| = gain·L + bias (+ zone_bias_N when pressing that zone), no-load is residual_N, sensor timestamps lag by delay_s.
 """
 from __future__ import annotations
 
@@ -33,11 +33,11 @@ class SynthSensor:
     gain: float = 1.05
     bias_N: float = 0.2
     residual_N: float = 0.1
-    zone_bias: Dict[str, float] = field(default_factory=dict)   # 구역 id → 추가 오차 N
+    zone_bias: Dict[str, float] = field(default_factory=dict)   # zone id → extra error N
 
 
 def load_profile(t: np.ndarray, levels=(4.0, 8.0, 12.0)):
-    """(하중 N, 누름 번호). 누름마다 levels를 돌아가며."""
+    """(load N, press index). Cycles through levels, one per press."""
     k = np.floor(t / PERIOD).astype(int)
     u = (t / PERIOD) - k
     a = np.clip(np.minimum(u / 0.2, (0.8 - u) / 0.2), 0, 1)
@@ -61,13 +61,13 @@ def make_session(folder: Path, sensors: List[SynthSensor], *, seconds: float = 1
                  sensor_hz: float = 100.0, gauge_hz: float = 10.0, schedule=None, crosstalk: float = 0.0,
                  simultaneous_every: int = 0, events: Optional[List[dict]] = None, settings=None,
                  gauge_outliers: int = 0) -> Path:
-    """schedule(k) → 누름 k에서 눌리는 센서 번호 (기본 0). 누름 위치는 그 센서 taxel을 차례로 (k*7 % N)."""
+    """schedule(k) → index of the sensor pressed at press k (default 0). Press positions step through that sensor's taxels (k*7 % N)."""
     folder.mkdir(parents=True, exist_ok=True)
     t0 = START.timestamp()
     schedule = schedule or (lambda k: 0)
     zsets = [load_zones(s.model) for s in sensors]
 
-    # 게이지
+    # gauge
     gt_rel = np.arange(0.0, seconds, 1.0 / gauge_hz) + 0.013
     L, _ = load_profile(gt_rel)
     gv = np.round(L, 1)
@@ -76,7 +76,7 @@ def make_session(folder: Path, sensors: List[SynthSensor], *, seconds: float = 1
         lines.insert(5 + i * 50, f"{t0 + gt_rel[4 + i * 50] + 0.001:.6f},-9000.0000")
     (folder / GAUGE_FILE).write_bytes(("\n".join(lines) + "\n").encode("ascii"))
 
-    # 센서 (같은 시계, delay_s 늦게 찍힘 = 센서 값이 게이지보다 늦게 따라감)
+    # sensor (same clock, stamped delay_s late = sensor values follow the gauge with a delay)
     src = _Src()
     rec = CsvRecorder(src, folder, sidecar=False)
     rec.start(START, attach=False)

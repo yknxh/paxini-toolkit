@@ -1,4 +1,4 @@
-"""시리얼 포트 (pyserial). 리더는 `open / read_available / write / close`만 쓴다."""
+"""Serial port (pyserial). The reader uses only `open / read_available / write / close`."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,7 +9,7 @@ from serial.tools import list_ports
 
 from .codec import USB_BAUDRATE
 
-# 센서 USB 직결 시 보이는 WCH CH343 USB-시리얼 (2026-10-04 확인)
+# WCH CH343 USB-serial seen when the sensor is connected directly over USB (confirmed 2026-10-04)
 CH343_VID_PID = (0x1A86, 0x55D3)
 
 
@@ -17,11 +17,11 @@ CH343_VID_PID = (0x1A86, 0x55D3)
 class PortInfo:
     device: str
     description: str
-    is_sensor: bool   # CH343이면 True (명령을 보내 확인하지는 않는다)
+    is_sensor: bool   # True if CH343 (not verified by sending commands)
 
 
 def list_serial_ports() -> List[PortInfo]:
-    """포트 목록. PXSR에 없는 명령을 보내지 않도록 VID:PID로만 센서 후보를 표시한다."""
+    """Port list. Sensor candidates are marked by VID:PID only, so no command absent from PXSR is sent."""
     out = []
     for p in sorted(list_ports.comports(), key=lambda p: p.device):
         out.append(PortInfo(p.device, p.description or "", (p.vid, p.pid) == CH343_VID_PID))
@@ -34,10 +34,10 @@ def default_sensor_port() -> Optional[str]:
 
 
 class SerialTransport:
-    """PXSR `Zn0`(Node serialport) 설정과 같게 연다: 921600 8N1, 흐름 제어 없음.
+    """Opens with the same settings as PXSR `Zn0` (Node serialport): 921600 8N1, no flow control.
 
-    모뎀 신호: PXSR 캡처에서 포트를 연 뒤 CH343 상태가 DTR 켜짐·RTS 꺼짐(0xA4 wValue 0xDF)이었다.
-    pyserial은 기본으로 RTS도 켜므로 열기 전에 RTS를 끈다.
+    Modem lines: in the PXSR capture, after opening the port the CH343 state was DTR on, RTS off (0xA4 wValue 0xDF).
+    pyserial turns RTS on by default, so RTS is turned off before opening.
     """
 
     def __init__(self, port: str, baudrate: int = USB_BAUDRATE) -> None:

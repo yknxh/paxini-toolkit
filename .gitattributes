@@ -1,9 +1,9 @@
-# 줄바꿈 규칙 (각 PC의 git 설정, 예: Windows 기본 core.autocrlf=true 보다 우선)
-# 기본: 텍스트는 저장소·작업 폴더 모두 LF
+# Line ending rules (override each PC's git settings, e.g. the Windows default core.autocrlf=true)
+# Default: text is LF in both the repository and the working tree
 * text=auto eol=lf
 
-# 테스트 기준 파일(PXSR CSV, 캡처 바이트)은 절대 변환하지 않는다 — 바이트 비교 대상
+# Test reference files (PXSR CSV, captured bytes) are never converted — they are compared byte for byte
 tests/fixtures/** -text
 
-# Windows 배치 파일만 CRLF
+# Only Windows batch files use CRLF
 *.bat text eol=crlf

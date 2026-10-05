@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "paxkit"
 version = "0.1.0"
-description = "Paxini Gen3 촉각 센서용 비공식 도구 (PXSR 대체 + force gauge 테스트)"
+description = "Unofficial tools for Paxini Gen3 tactile sensors (PXSR replacement + force gauge testing)"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.26",
-    # 3.x는 Windows 스마트 앱 컨트롤이 DLL을 막는다 (서명·평판 없음, 2026-10-05 이 PC에서 3.0.6 확인). 2.2.3은 통과
+    # 3.x DLLs are blocked by Windows Smart App Control (unsigned/no reputation; 3.0.6 confirmed on this PC 2026-10-05). 2.2.3 passes
     "pandas>=2.2,<2.3",
     "pyserial>=3.5",
     "pyyaml>=6.0",
@@ -24,11 +24,14 @@ dev = ["pytest>=8"]
 [project.gui-scripts]
 paxkit = "paxkit.gui.app:main"
 
+[project.scripts]
+paxkit-cli = "paxkit.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["paxkit*"]
 
 [tool.setuptools.package-data]
-# 센서 점 모델(PXSR에서 추출)·게이지 테스트 구역 정의
+# Sensor point models (extracted from PXSR) and gauge test zone definitions
 paxkit = ["device/geometry/*.json", "bench/zones/*.json"]
 
 [tool.pytest.ini_options]
