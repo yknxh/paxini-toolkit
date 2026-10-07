@@ -250,7 +250,7 @@ def points_figure(g: Geometry, points, samples: pd.DataFrame, point_rows: pd.Dat
 
     One panel per zone, laid out like the sensor (row 0 = tip; columns = left side, top, right side). x = gauge N,
     y = error e = |F| − gauge in N (0 = reads the true force; 2026-10-07 user request, was 100·e / gauge %), for contact
-    samples. Each point has its own color (stable samples); gray = not stable. Legend: mean |e| / gauge % (the main
+    samples; dotted lines y = ±x (e = ±gauge). Each point has its own color (stable samples); gray = not stable. Legend: mean |e| / gauge % (the main
     figure) and n per point; panel title: the same over all the zone's points. The small drawing marks the zone's taxels
     and its points. Zones without points stay in the grid as an untested drawing; points in no zone go to an extra
     "Other" panel. The y axis is shared and covers 99 % of the stable samples."""
@@ -289,6 +289,8 @@ def points_figure(g: Geometry, points, samples: pd.DataFrame, point_rows: pd.Dat
         ax = f.add_subplot(inner[0, 1])
         _style(ax, theme)
         ax.axhline(0.0, color=t["zero"], linewidth=0.8, linestyle="--")
+        for k in (1.0, -1.0):  # e = ±gauge: |F| = 2 × gauge / |F| = 0 (2026-10-08 user request)
+            ax.axline((0.0, 0.0), slope=k, color=t["zero"], linewidth=0.8, linestyle=":")
         zs = ct[ct["point"].astype(str).isin([p.id for p in ps])]
         off = zs["stable"].to_numpy() != 1
         ax.scatter(zs["gauge_N"].to_numpy(dtype=float)[off], zs["error_N"].to_numpy(dtype=float)[off], s=3,
@@ -309,7 +311,8 @@ def points_figure(g: Geometry, points, samples: pd.DataFrame, point_rows: pd.Dat
         leg = ax.legend(loc="best", fontsize=7, frameon=False, labelcolor=t["fg"], markerscale=3, handletextpad=0.3)
         leg.set_zorder(5)
     f.suptitle(title + " by zone  (x = gauge N, y = error |F| − gauge N; colored = stable samples per point, "
-               "gray = not stable, dashed = 0; legend: mean |e| / gauge %, n)", color=t["fg"], fontsize=11)
+               "gray = not stable, dashed = 0,\ndotted = y = ±x (error ±100 % of gauge); legend: mean |e| / gauge %, n)",
+               color=t["fg"], fontsize=11)
     return f
 
 
