@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QComboBox, QFormLayout, QGroupBox, QHBoxLayout, Q
 
 from ..config import Config
 from ..device.sim import SIM_VERSIONS, SimUsbTransport
-from ..device.transport import SerialTransport, list_serial_ports
+from ..device.transport import SerialTransport, list_serial_ports, port_serial_number
 from ..device.usb import STALL_S, UsbSensor
 from ..state import load_state, save_state
 from . import theme
@@ -30,6 +30,7 @@ class DevicePanel(QWidget):
         self._t_connect = 0.0
         self._is_sim = False
         self._port = ""
+        self._usb_serial = ""
 
         self.port_combo = QComboBox()
         refresh = QPushButton("Refresh")
@@ -96,6 +97,7 @@ class DevicePanel(QWidget):
             return
         self._is_sim = port.startswith(SIM_PREFIX)
         self._port = port
+        self._usb_serial = "" if self._is_sim else port_serial_number(port)
         if self._is_sim:
             transport = SimUsbTransport(port[len(SIM_PREFIX):])
         else:
@@ -112,7 +114,7 @@ class DevicePanel(QWidget):
 
     def connection_info(self) -> dict:
         """Connection info stored in the recording sidecar."""
-        return {"mode": "usb", "port": self._port, "simulated": self._is_sim}
+        return {"mode": "usb", "port": self._port, "simulated": self._is_sim, "usb_serial": self._usb_serial}
 
     def disconnect_sensor(self) -> None:
         if self.sensor is not None and self.sensor.is_alive():

@@ -31,7 +31,7 @@ paxkit-cli = "paxkit.cli:main"
 include = ["paxkit*"]
 
 [tool.setuptools.package-data]
-# Sensor point models (extracted from PXSR) and gauge test zone definitions
+# Sensor point models (extracted from PXSR) and the zone groups of points.png
 paxkit = ["device/geometry/*.json", "bench/zones/*.json"]
 
 [tool.pytest.ini_options]

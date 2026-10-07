@@ -248,17 +248,37 @@ def test_sim_bench_tab_record_analyze_results(tmp_path):
     b.cal_btn.click()
     assert pump(3.0, lambda: any(e["kind"] == "calibration" for e in b.pending_events))
     assert b.start_btn.isEnabled()
+    # test points: click the drawing (P1 while preparing, P2/P3 while recording); outside the sensor = no point
+    tx = b.map.geometry_.taxels
+    b.pick_point(tx[14, 0], tx[14, 1])
+    assert b.current_point == "P1" and b.pending_events[-1]["kind"] == "point_select"
+    b.pick_point(100.0, 100.0)
+    assert b.current_point is None
+    b.pick_point(tx[14, 0] + 0.2, tx[14, 1])
+    assert b.current_point == "P1" and len(b.point_set.points) == 1
     b.start_btn.click()
     assert b.recording and not b.label_edit.isEnabled()
-    pump(9.0)
+    pump(3.0)
+    b.pick_point(tx[3, 0], tx[3, 1])
+    pump(3.0)
+    b.pick_point(tx[20, 0], tx[20, 1])
+    pump(3.0)
+    assert [p.id for p in b.point_set.points] == ["P1", "P2", "P3"] and b.current_point == "P3"
     assert b.coverage.total_stable > 0 and "Recording" in b.lbl_rec.text()
+    assert sum(b.coverage.point_stats(p)[0] for p in ("P1", "P2", "P3")) > 0
     folder = b.session.folder
-    b.stop_btn.click()
+    b.stop_btn.click()   # post-test no-load check (noload_check_s, still recording), then stop → analyze
+    assert b.recording and not b.stop_btn.isEnabled() and b.cancel_btn.isEnabled()
     assert pump(30.0, lambda: res.result is not None)
     assert w.tabs.currentWidget() is res and res.result.folder == folder
-    assert res.fig_tabs.count() == 3 and res.table.rowCount() == 8
+    assert [p.id for p in res.result.points] == ["P1", "P2", "P3"]
+    assert res.fig_tabs.count() == 4 and res.table.rowCount() == 1 + 3
+    assert (folder / "plots" / "noload.png").is_file()
+    assert (folder / "plots" / "error_map.png").is_file() and (folder / "plots" / "points.png").is_file()
     meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
-    assert [e["kind"] for e in meta["events"]] == ["noload_check", "calibration"] and meta["status"] == "stopped"
+    assert [e["kind"] for e in meta["events"]] == ["noload_check", "calibration"] + ["point_select"] * 3 + ["noload_after"]
+    assert res.result.result["noload_after"]["kind"] == "noload_after" and "After the test" in res.summary.text()
+    assert meta["status"] == "stopped"
     assert (folder / "report.html").is_file() and res.sessions.count() == 1
     # re-analyze button (overwrites the same result files)
     res.result = None
@@ -271,11 +291,14 @@ def test_sim_bench_tab_record_analyze_results(tmp_path):
     b.cancel_btn.click()
     pump(0.5)
     assert res.sessions.count() == 2 and not (b.session.folder / "result.json").exists()
+    ev = json.loads((b.session.folder / "meta.json").read_text(encoding="utf-8"))["events"]
+    assert [e.get("point") for e in ev if e["kind"] == "point_select"] == ["P3"]   # the point still selected
     assert json.loads((b.session.folder / "meta.json").read_text(encoding="utf-8"))["status"] == "cancelled"
     # a new label or a new sensor connection clears the previous test's coverage / preparation events
     from paxkit.gui.bench_panel import COVERAGE_IDLE, NOLOAD_IDLE
     b.label_edit.setText("A2")
     assert b.session is None and b.lbl_cov.text() == COVERAGE_IDLE and b.lbl_rec.text() == "-"
+    assert b.point_set.points == [] and b.current_point is None
     b.noload_btn.click()
     assert pump(2.0, lambda: bool(b.pending_events))
     old = d.sensor

@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import queue
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,9 +23,12 @@ from .config import Config
 
 SIM_MODELS = ("S1813E", "S2015")   # keys of `device.sim.SIM_VERSIONS`
 WAIT_S = 10.0                      # how long to wait for the first data after connecting
-GUIDE = ("Press the sensor surface at many different positions with 0-{max:g} N. Hold each press still for "
-         "about 1 s, then change the force slowly, and move to another position. Keep the gauge tip normal to "
-         "the pressed surface. Do not exceed {max:g} N. Recommended 3-5 min, until every zone is 'enough'.")
+GUIDE = ("Choose a test point (below), then press exactly that spot: hold the force still for about 1 s at several "
+         "levels spread over 0-{max:g} N (e.g. 2, 5, 8, 12 N), release, and repeat once or twice. Then choose the next "
+         "point. Keep the gauge tip normal to the pressed surface. Do not exceed {max:g} N.")
+POINT_HELP = ("Test points: type where you press next, then Enter - 'x y' in mm (top view, up = rounded tip, "
+              "right = +x), 't<n>' = on taxel n, 'P<n>' = an earlier point, '-' = no point (presses not located). "
+              "Clicking the drawing in the GUI is easier.")
 
 
 class CliError(Exception):
@@ -54,6 +59,81 @@ class StatusLine:
             sys.stdout.write("\n")
             sys.stdout.flush()
         self._width = 0
+
+
+class PointInput:
+    """Test point selection typed on the terminal (the CLI version of clicking the drawing in the GUI).
+
+    Lines are read by a stdin thread and applied in the main loop (`poll`): `point_select` session event + coverage."""
+
+    def __init__(self, model: str) -> None:
+        from .bench.points import PointSet
+        from .device.geometry import load_geometry
+
+        g = load_geometry(model)
+        self.points = PointSet(g) if g is not None else None
+        self.current = None
+        self._lines: "queue.Queue[str]" = queue.Queue()
+
+    def parse(self, line: str):
+        """Line → (ok, point or None, message)."""
+        line = line.strip()
+        ps = self.points
+        if ps is None:
+            return False, None, "no sensor drawing for this model - test points not available"
+        if line == "-":
+            return True, None, "No point selected (presses are not located)"
+        if line[:1] in ("P", "p") and line[1:].isdigit():
+            pt = ps.get("P" + line[1:])
+            return (True, pt, "") if pt is not None else (False, None, f"no point {line}")
+        try:
+            if line[:1] in ("t", "T"):
+                i = int(line[1:])
+                x, y = ps.geometry.taxels[i, :2]
+            else:
+                x, y = (float(v) for v in line.replace(",", " ").split())
+        except (ValueError, IndexError):
+            return False, None, f"not understood: {line!r}. " + POINT_HELP
+        pt = ps.pick(float(x), float(y))
+        return (True, pt, "") if pt is not None else (False, None, f"({x:.1f}, {y:.1f}) mm is outside the sensor")
+
+    def describe(self, pt) -> str:
+        if pt is None:
+            return "No point selected (presses are not located)"
+        return f"Pressing {pt.id} ({pt.x_mm:.1f}, {pt.y_mm:.1f} mm)"
+
+    def select(self, pt, sess, cov, t: Optional[float] = None) -> None:
+        from .bench.points import SELECT_EVENT, select_event
+
+        self.current = pt
+        t = time.time() if t is None else t
+        sess.note_event(SELECT_EVENT, t, **select_event(pt))
+        if cov is not None:
+            cov.select_point(t, pt.id if pt is not None else None)
+
+    def start_reading(self) -> None:
+        def work():
+            for line in sys.stdin:
+                self._lines.put(line)
+
+        threading.Thread(target=work, daemon=True, name="PointInput").start()
+
+    def poll(self, sess, cov) -> List[str]:
+        """Apply the lines typed since the last call. Returns messages to print."""
+        out = []
+        while True:
+            try:
+                line = self._lines.get_nowait()
+            except queue.Empty:
+                return out
+            if not line.strip():
+                continue
+            ok, pt, msg = self.parse(line)
+            if not ok:
+                out.append(msg)
+            elif pt is not self.current:
+                self.select(pt, sess, cov)
+                out.append(self.describe(pt))
 
 
 def _mmss(seconds: float) -> str:
@@ -97,7 +177,7 @@ def _sensor_alive(sensor) -> bool:
 def open_sensor(args, cfg: Config, verbose: bool = True):
     """Connect the USB sensor (or a simulated one) like the GUI device panel. Returns (sensor, connection info)."""
     from .device.sim import SimUsbTransport
-    from .device.transport import SerialTransport, default_sensor_port
+    from .device.transport import SerialTransport, default_sensor_port, port_serial_number
     from .device.usb import STALL_S, UsbSensor
     from .state import load_state, save_state
 
@@ -131,7 +211,8 @@ def open_sensor(args, cfg: Config, verbose: bool = True):
                        stall_s=float(cfg.get("device.stall_s") or STALL_S))
     print(f"Connecting sensor on {port} ...", flush=True)
     sensor.start()
-    info = {"mode": "usb", "port": port, "simulated": bool(sim), "client": "cli"}
+    info = {"mode": "usb", "port": port, "simulated": bool(sim), "client": "cli",
+            "usb_serial": "" if sim else port_serial_number(port)}
     return sensor, info
 
 
@@ -221,7 +302,8 @@ def cmd_ports(args, cfg: Config) -> int:
     if not ports:
         print("No serial ports found.")
     for p in ports:
-        print(f"{p.device:<24} {p.description}" + ("   [sensor candidate: CH343]" if p.is_sensor else ""))
+        print(f"{p.device:<24} {p.description}" + (f"   SN {p.serial_number}" if p.serial_number else "")
+              + ("   [sensor candidate: CH343]" if p.is_sensor else ""))
     print(f"\nconfig.yaml: device.port = {cfg.get('device.port') or '(auto)'}, gauge.port = {cfg.get('gauge.port') or '-'}")
     return 0
 
@@ -335,21 +417,17 @@ def cmd_record(args, cfg: Config) -> int:
 
 
 def _print_coverage(cov) -> None:
-    zs = cov.zones
-    print(f"Stable samples {cov.total_stable} (contact {cov.total_contact}, no position {cov.no_zone})")
-    if zs is None:
-        return
-    enough = cov.enough()
-    b = cov.bins
-    print(f"  {'zone':<20} {'stable':>6}  force bins {b[0]:g}-{b[1]:g} / {b[1]:g}-{b[2]:g} / {b[2]:g}+ N")
-    for k, z in enumerate(zs.zones):
-        bins = " ".join(f"{int(c):>4}" for c in cov.bin_counts[k])
-        print(f"  {z.name:<20} {int(cov.stable[k]):>6}  {bins}   {'enough' if enough[k] else 'not enough'}")
+    print(f"Stable samples {cov.total_stable} (contact {cov.total_contact}, no test point {cov.no_point})")
+    for pid in cov.points:
+        n, nfit, pct = cov.point_stats(pid)
+        print(f"  {pid:<5} contact {n:>5}  stable {nfit:>5}  sensitivity error "
+              + ("-" if pct is None else f"{pct:+.1f}%") + " (before lag correction)")
 
 
 def print_result(res) -> None:
     """Short summary of a gauge test analysis (`BenchResult`)."""
     from .bench.plots import lag_text
+    from .bench.report import noload_lines
 
     m = res.metrics.iloc[0]
     f = lambda v, nd=3: "-" if v is None or v != v else f"{float(v):.{nd}f}"
@@ -360,13 +438,23 @@ def print_result(res) -> None:
           f"RMSE {f(m['rmse_contact_N'])} N")
     for s in res.sensors:
         print(f"  {s['label']} ({s.get('model')}): {s['rate_hz']} Hz, residual lag {lag_text(s)}")
+    pts = res.metrics[res.metrics["scope"] == "point"]
+    for r in pts.to_dict(orient="records"):
+        print(f"  {r['name']}: n {r['n_fit']}, mean |e|/gauge {f(r['abs_err_pct'], 1)}%, "
+              f"mean e/gauge {f(r['bias_pct'], 1)}%, RMSE {f(r['rmse_N'], 2)} N"
+              + ("" if r["enough"] else " (too few samples, not in the maps)"))
+    for e in res.result.get("error_map") or []:
+        print(f"  usable (mean |e| < {e['k_pct']:g}%): {e['points_ok']}/{e['points']} points"
+              + ("" if e["area_ok_pct"] is None else f", {e['area_ok_pct']:.0f}% of the tested area"))
+    for line in noload_lines(res.result):
+        print(f"  no-load {line[0].lower()}{line[1:]}")
     for w in res.warnings:
         print(f"  warning: {w}")
     print(f"  report: {res.folder / 'report.html'}")
 
 
 def cmd_bench(args, cfg: Config) -> int:
-    from .bench import BenchSession, Coverage, analyze_session, bench_settings, load_zones, noload_check
+    from .bench import NOLOAD_AFTER_EVENT, BenchSession, Coverage, analyze_session, bench_settings, noload_check
 
     settings = bench_settings(cfg)
     sensor, sensor_info = open_sensor(args, cfg)
@@ -401,21 +489,44 @@ def cmd_bench(args, cfg: Config) -> int:
             print(f"No-load: gauge {g}, sensor |F| {s}" + (" - " + "; ".join(nl["warnings"]) if nl["warnings"] else " - OK"))
             pending.append(("noload_check", t0, nl))
 
-        print("\n" + GUIDE.format(max=float(settings["max_N"])) + "\n")
+        print("\n" + GUIDE.format(max=float(settings["max_N"])) + "\n" + POINT_HELP + "\n")
+        model = sensor.sensor_type.label
+        points = PointInput(model)
+        first = None
+        if args.point:
+            ok, first, msg = points.parse(args.point)
+            if not ok:
+                raise CliError(f"--point: {msg}")
+        elif not args.yes:
+            while True:
+                try:
+                    line = input("First test point (Enter = none yet): ")
+                except EOFError:
+                    break
+                if not line.strip():
+                    break
+                ok, first, msg = points.parse(line)
+                if ok:
+                    break
+                print(msg)
+        print(points.describe(first))
         if not _confirm("Press Enter to start recording (Ctrl+C to abort) ", args.yes):
             return 1
-        model = sensor.sensor_type.label
         sess = BenchSession(sensor, gauge, settings, label=args.label, model=model, sensor_info=sensor_info,
                             gauge_info=gauge_info, gauge_config=cfg.section("gauge"),
                             root=Path(args.out).resolve() if args.out else None)
         for kind, t, info in pending:
             sess.note_event(kind, t, **info)
-        cov = Coverage(load_zones(model), settings)
+        cov = Coverage(settings)
+        if first is not None:
+            points.select(first, sess, cov)
         folder = sess.start()
         sensor.add_sink(cov.add_frame)
         gauge.add_sink(cov.add_gauge)
         print(f"Recording to {folder}" + (f" for {args.duration:g} s" if args.duration else "")
-              + " (Ctrl+C to stop and analyze)")
+              + " (Ctrl+C to stop and analyze). Type the next test point + Enter at any time.")
+        if not args.yes:
+            points.start_reading()
         status = StatusLine()
         reason = ""
         max_N = float(settings["max_N"])
@@ -432,20 +543,43 @@ def cmd_bench(args, cfg: Config) -> int:
                 if not gauge.is_alive():
                     reason = f"gauge {gauge.status} {gauge.error}"
                     break
+                msgs = points.poll(sess, cov)
+                if msgs:
+                    status.end()
+                    for m in msgs:
+                        print(m)
                 cov.update()
                 g = gauge.latest()
                 _, mag = force_N(sensor)
-                enough = cov.enough()
+                cur = points.current
+                pt = ""
+                if cur is not None:
+                    _, n, pct = cov.point_stats(cur.id)
+                    pt = f"  {cur.id}: {n} stable" + ("" if pct is None else f", mean |e| {pct:.1f}%")
                 text = (f"{_mmss(elapsed)}  gauge " + ("-" if g is None else f"{g:5.1f} N")
                         + ("  |F| -" if mag is None else f"  |F| {mag:5.1f} N")
-                        + f"  stable {cov.total_stable}"
-                        + (f"  zones enough {int(enough.sum())}/{len(enough)}" if cov.zones is not None else "")
+                        + f"  stable {cov.total_stable}" + (pt or "  no point")
                         + (f"  OVER {max_N:g} N!" if g is not None and g > max_N else ""))
                 status.show(text)
                 time.sleep(0.2)
         except KeyboardInterrupt:
             pass
         status.end()
+        if not reason and not args.skip_noload:
+            # post-test no-load check while still recording (Ctrl+C again skips it)
+            secs = float(settings["noload_check_s"])
+            print(f"Post-test no-load check ({secs:g} s): take your hands off the sensor and gauge now (Ctrl+C = skip)")
+            try:
+                t0 = sensor.clock.wall()
+                _sleep_status(secs, "Post-test no-load check, hands off ...")
+                nl = noload_check(sensor.buffer, gauge.buffer, t0, sensor.clock.wall(), float(settings["noload_warn_N"]))
+                sess.note_event(NOLOAD_AFTER_EVENT, t0, **nl)
+                g = "-" if nl["gauge_mean_N"] is None else f"{nl['gauge_mean_N']:+.2f} N"
+                s = "-" if nl["sensor_F_mean_N"] is None else f"{nl['sensor_F_mean_N']:.2f} N"
+                print(f"After the test: gauge {g}, sensor |F| {s}"
+                      + (" - " + "; ".join(nl["warnings"]) if nl["warnings"] else " - OK"))
+            except KeyboardInterrupt:
+                print("Post-test no-load check skipped.")
         sensor.remove_sink(cov.add_frame)
         gauge.remove_sink(cov.add_gauge)
         sess.stop(cancelled=False)
@@ -552,9 +686,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--label", required=True, help="sensor name used in the session folder, e.g. A1")
     p.add_argument("--duration", type=float, default=0, help="seconds to record (default: until Ctrl+C)")
     p.add_argument("--calibrate", action="store_true", help="calibrate once before the no-load check")
-    p.add_argument("--skip-noload", action="store_true", help="skip the no-load check")
+    p.add_argument("--skip-noload", action="store_true", help="skip the no-load checks (before and after the test)")
     p.add_argument("--no-analyze", action="store_true", help="only record; analyze later with `analyze`")
     p.add_argument("--out", help="parent folder for the session folder (default: data/bench/)")
+    p.add_argument("--point", help="first test point: 'x y' mm (top view), or 't<n>' = on taxel n "
+                                   "(more points can be typed while recording)")
 
     p = sub.add_parser("analyze", parents=[common], help="(re)analyze gauge test session folders")
     p.add_argument("folders", nargs="*", help="session folders (data/bench/<...>)")

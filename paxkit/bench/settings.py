@@ -5,17 +5,20 @@ from typing import Any, Dict, Optional
 
 DEFAULTS: Dict[str, Any] = {
     "max_N": 15.0,
-    "contact_N": 0.5,
+    "contact_N": 1.0,
     "noload_N": 0.2,
     "noload_warn_N": 0.3,
-    "noload_check_s": 3.0,
+    "noload_check_s": 3.0,     # no-load check before the test and after it (Stop → hands off → stop)
+    "end_residual_min_s": 1.0,   # residual at the end of the recording: trailing no-load run of at least this
     "stable_window_s": 0.2,
     "stable_slope_N_per_s": 2.0,
     "max_gap_s": 0.1,
     "gauge_max_N": 100.0,
-    "min_taxel_sum": 5.0,
     "bin_N": 1.0,
-    "zone_min_samples": 20,
+    "pct_min_N": 1.0,          # error % (and the reference gain fit): stable samples with gauge ≥ this
+    "point_min_samples": 10,   # test point "enough" threshold (samples in its error %); fewer → left out of the maps
+    "point_min_range_N": 5.0,  # warn if a point was pressed only below this (its error % covers light forces only)
+    "err_levels": [5, 10, 20, 30],   # error map: contour lines at these mean |e| % values (k); usable = mean |e| % < k
     "lag_warn_s": 0.1,
     "lag_correct": True,   # measure the remaining gauge lag per session by cross-correlation and correct it before pairing
     "lag_min_r": 0.8,      # no correction if the correlation is below this (estimate unreliable)
@@ -35,9 +38,3 @@ def bench_settings(cfg=None, override: Optional[Dict[str, Any]] = None) -> Dict[
     if override:
         out.update(override)
     return out
-
-
-def force_bins(s: Dict[str, Any]):
-    """Coverage force-bin edges: 0 ~ max_N split into thirds (15 N → 0~5 / 5~10 / 10~15; the last bin also covers values above)."""
-    m = float(s["max_N"])
-    return [0.0, m / 3, 2 * m / 3]

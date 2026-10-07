@@ -2,9 +2,9 @@
 
 - `taxels`: position of taxel i (mm, PXSR sensor coordinates). Same values as the paxtest geometry JSON (same source).
 - `surface`: surface point positions with 4 neighbor taxels and weights. PXSR colors a surface point by the sum of neighbor taxel value × weight.
-- `normals`: taxel surface normals (third column of rotation matrix `B6`/`U6`). Used to split zones (side/top).
+- `normals`: taxel surface normals (third column of rotation matrix `B6`/`U6`).
 
-Drawings are x–y plane projections (top view). Used only for display and analysis (CoP, zones), never for recorded values.
+Drawings are x–y plane projections (top view). Used only for display and test point picking, never for recorded values.
 """
 from __future__ import annotations
 

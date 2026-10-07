@@ -11,6 +11,11 @@ amount before pairing (`lag_correct`, 2026-10-05 user request). The applied shif
 With multiple sensors (HAND), the sensor with the largest |F| at each gauge sample is taken as the "pressed sensor"; if the
 second sensor is >= `simultaneous_ratio` of the first, it counts as simultaneous contact and is excluded from the metrics.
 Interference and channel mapping are also computed here.
+
+Location (2026-10-06/07 user decisions): only the test points the tester selected (`point_select` events). Each sample
+belongs to the point selected at its time; there is no automatic location from taxel values any more (unreliable: force
+shows on taxels that were not pressed). Per-point metrics (scope "point"), `points` and the usable-region summary
+`error_map` are in result.json. Sessions without selections (or with several sensors) get overall results only.
 """
 from __future__ import annotations
 
@@ -29,14 +34,14 @@ from ..gauge.sync import xcorr_offset
 from ..recording.reader import read_log
 from .metrics import COLUMNS as METRIC_COLUMNS, _r, group_metrics
 from .pairing import SensorSeries, pair_sensor
-from .session import GAUGE_FILE, META_FILE
+from .points import TestPoint, assign, points_from_events, selections, usable_summary
+from .session import GAUGE_FILE, META_FILE, NOLOAD_AFTER_EVENT
 from .settings import bench_settings
-from .zones import NO_ZONE, load_zones
 
 RESULT_FORMAT = "paxkit-bench-result/1"
-ANALYSIS_VERSION = 1
+ANALYSIS_VERSION = 4   # 2: test points (location by click), 3: points only (no taxel zones), 4: mean |e| % main, post-test no-load
 SAMPLE_COLUMNS = ["t_unix_s", "sensor", "gauge_N", "F_N", "Fx_N", "Fy_N", "Fz_N", "error_N", "error_z_N",
-                  "contact", "stable", "noload", "simultaneous", "zone", "cop_x_mm", "cop_y_mm", "cop_z_mm"]
+                  "contact", "stable", "noload", "released", "simultaneous", "point"]
 LAG_MAX_S = 0.5
 LAG_MIN_STD_N = 0.3
 
@@ -57,6 +62,11 @@ class BenchResult:
     @property
     def sensors(self) -> List[Dict[str, Any]]:
         return self.result["sensors"]
+
+    @property
+    def points(self) -> List[TestPoint]:
+        """Test points (click mode), empty for taxel-located sessions."""
+        return [TestPoint(p["id"], p["x_mm"], p["y_mm"], p["z_mm"], p["taxel"]) for p in self.result.get("points") or []]
 
     def sensor_samples(self, label: str) -> pd.DataFrame:
         return self.samples[self.samples["sensor"] == label]
@@ -138,19 +148,15 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
         label = ms.get("label") or (meta.get("label") if len(log.sensors) == 1 else None) or f"{key[0]}-{key[1]}"
         fr = log.force_raw(key)
         series = SensorSeries(log.t, fr, tz)
-        zs = load_zones(model) if model else None
-        if zs is None:
-            warnings.append(f"{label}: no zone definition ({model}) → no per-zone results")
         smag = np.sqrt(((fr * 0.1) ** 2).sum(axis=1))
         lag, r = _sensor_lag(gt, gv, log.t, smag)
         # sensor(t + lag) ≈ gauge(t) → shifting gauge sample times by lag pairs up the same instants
         shift = lag if (s["lag_correct"] and lag is not None and r is not None and r >= float(s["lag_min_r"])) else 0.0
-        cols = pair_sensor(gt + shift, gv, series, s, zs)
+        cols = pair_sensor(gt + shift, gv, series, s)
         dur = float(log.t[-1] - log.t[0]) if len(log.t) > 1 else 0.0
         info = {"label": label, "channel": key[0], "slot": key[1], "model": model, "taxels": int(tz.shape[1]),
                 "frames": int(len(log.t)), "rate_hz": _r(len(log.t) / dur if dur > 0 else 0.0, 2),
-                "lag_s": lag, "lag_r": r, "lag_applied_s": round(shift, 4), "zones": [z.id for z in zs.zones] if zs else [],
-                "zone_names": [z.name for z in zs.zones] if zs else []}
+                "lag_s": lag, "lag_r": r, "lag_applied_s": round(shift, 4)}
         if lag is not None and abs(lag) > float(s["lag_warn_s"]):
             how = "corrected in analysis" if shift else f"not corrected (correlation r {r:.2f} < {float(s['lag_min_r']):g} or lag_correct off)"
             warnings.append(f"{label}: sensor-gauge lag {lag * 1e3:+.0f} ms (|lag| > {s['lag_warn_s'] * 1e3:.0f} ms, {how}"
@@ -179,9 +185,19 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
     for k in ("contact", "stable"):
         cols[k] = cols[k] & ~simultaneous
     cols["simultaneous"] = simultaneous
+
+    # location: only the test points selected by the tester
+    events = meta.get("events", [])
+    sel_t, sel_ids = selections(events)
+    click = bool(len(sel_t)) and len(per) == 1
+    if len(sel_t) and len(per) > 1:
+        warnings.append("Test point selections ignored: not supported for multi-sensor sessions (overall results only)")
+    elif not len(sel_t):
+        warnings.append("No test points were selected: overall results only (click the sensor drawing in the Test tab "
+                        "to choose where you press)")
+    points = points_from_events(events) if click else []
+    point_col = assign(cols["t_unix_s"], sel_t, sel_ids) if click else np.full(n, "", dtype=object)
     labels = np.array([x["label"] for x in sensors])
-    zone_ids = [x["zones"] for x in sensors]
-    zone_col = np.array([zone_ids[p][z] if z != NO_ZONE else "" for p, z in zip(pressed, cols["zone"])], dtype=object)
     sensor_col = labels[pressed] if n else np.array([], dtype=object)
 
     # metrics
@@ -199,13 +215,10 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
             m = group_metrics(cols, sm, s, None)
             m.update({k: nl[k] for k in ("n_noload", "noload_mean_N", "noload_max_N")})
             rows.append({"scope": "sensor", "sensor": info["label"], "id": "all", "name": info["label"], **m})
-        for zk, (zid, zname) in enumerate(zip(info["zones"], info["zone_names"])):
-            zm = sm & (cols["zone"] == zk)
-            rows.append({"scope": "zone", "sensor": info["label"], "id": zid, "name": zname,
-                         **group_metrics(cols, zm, s, None)})
-        nz = sm & cols["stable"] & (cols["zone"] == NO_ZONE)
-        if nz.any():
-            warnings.append(f"{info['label']}: {int(nz.sum())} stable samples without position (taxel Z sum < {s['min_taxel_sum']:g}) — included in overall only")
+    for p in points:
+        m = group_metrics(cols, point_col == p.id, s, None)
+        rows.append({"scope": "point", "sensor": sensors[0]["label"], "id": p.id,
+                     "name": f"{p.id} ({p.x_mm:.1f}, {p.y_mm:.1f} mm)", **m})
     metrics = pd.DataFrame(rows, columns=["scope", "sensor", "id", "name"] + METRIC_COLUMNS)
 
     crosstalk = _crosstalk(per, pressed, cols, gv, labels) if len(per) > 1 else None
@@ -215,20 +228,29 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
         "t_unix_s": cols["t_unix_s"], "sensor": sensor_col, "gauge_N": cols["gauge_N"], "F_N": cols["F_N"],
         "Fx_N": cols["Fx_N"], "Fy_N": cols["Fy_N"], "Fz_N": cols["Fz_N"], "error_N": cols["error_N"],
         "error_z_N": cols["error_z_N"], "contact": cols["contact"].astype(int), "stable": cols["stable"].astype(int),
-        "noload": cols["noload"].astype(int), "simultaneous": simultaneous.astype(int), "zone": zone_col,
-        "cop_x_mm": cols["cop_x_mm"], "cop_y_mm": cols["cop_y_mm"], "cop_z_mm": cols["cop_z_mm"],
+        "noload": cols["noload"].astype(int), "released": released_mask(cols, s).astype(int),
+        "simultaneous": simultaneous.astype(int), "point": point_col,
     }, columns=SAMPLE_COLUMNS)
     samples = samples[np.isfinite(cols["F_N"])].reset_index(drop=True)
     unpaired = int(n - len(samples))
     if unpaired:
         warnings.append(f"Excluded {unpaired} gauge samples without a sensor pair (gap between sensor frames > {s['max_gap_s']:g} s or outside the recording)")
-    st = metrics[metrics["scope"] == "zone"]
-    thin = st[~st["enough"].astype(bool)]
+    pt = metrics[metrics["scope"] == "point"]
+    thin = pt[~pt["enough"].astype(bool)]
     if len(thin):
-        warnings.append(f"{len(thin)} zones with insufficient data (stable samples < {s['zone_min_samples']}): " + ", ".join(
-            (f"{a}/" if len(per) > 1 else "") + b for a, b in zip(thin["sensor"], thin["name"])))
+        warnings.append(f"{len(thin)} test points with too few stable samples ≥ {s['pct_min_N']:g} N "
+                        f"(< {s['point_min_samples']}), left out of the maps: " + ", ".join(thin["id"]))
+    low = pt[pt["enough"].astype(bool) & (pd.to_numeric(pt["gauge_max_N"], errors="coerce") < float(s["point_min_range_N"]))]
+    if len(low):
+        warnings.append(f"{len(low)} test points pressed only below {s['point_min_range_N']:g} N (sensitivity less "
+                        "certain; press 0–10 N): " + ", ".join(low["id"]))
+    if click:
+        n_free = int((cols["contact"] & (point_col == "")).sum())
+        if n_free:
+            warnings.append(f"{n_free} contact samples with no test point selected — included in overall only")
 
     noload_events = [e for e in meta.get("events", []) if e.get("kind") == "noload_check"]
+    after_events = [e for e in meta.get("events", []) if e.get("kind") == NOLOAD_AFTER_EVENT]
     dur = float(gt[-1] - gt[0]) if n > 1 else 0.0
     result = {
         "format": RESULT_FORMAT,
@@ -248,6 +270,10 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
                    "simultaneous": int(simultaneous.sum())},
         "duration_s": _r(dur, 3),
         "noload_check": noload_events[-1] if noload_events else None,
+        "noload_after": after_events[-1] if after_events else None,
+        "end_residual": end_residual(cols, s),
+        "points": [p.to_dict() for p in points],
+        "error_map": error_map_summary(metrics, points, s) if click else None,
         "metrics": _records(metrics),
         "crosstalk": _records(crosstalk) if crosstalk is not None else None,
         "channel_check": channel_check,
@@ -258,6 +284,58 @@ def analyze_session(folder: Union[str, Path], settings: Optional[Dict[str, Any]]
         from .report import write_outputs
         write_outputs(res)
     return res
+
+
+def released_mask(cols: Dict[str, np.ndarray], settings: Dict[str, Any]) -> np.ndarray:
+    """Samples with nothing pressed and held still (`released` column, used for the residual): gauge < `contact_N` and
+    gauge and sensor slopes within the stability rule. The gauge threshold is `contact_N`, not `noload_N`, because the
+    gauge itself can keep a small offset (e.g. lying on its side). A NaN slope (too few points in the window: the ends of
+    the recording) counts as still."""
+    lim = float(settings["stable_slope_N_per_s"])
+    still = lambda sl: ~(np.abs(sl) > lim)
+    return (cols["paired"] & (cols["gauge_N"] < float(settings["contact_N"]))
+            & still(cols["slope_gauge"]) & still(cols["slope_sensor"]))
+
+
+def end_residual(cols: Dict[str, np.ndarray], settings: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Residual force at the end of the recording, from the data: the last run of `released` samples (`released_mask`)
+    that reaches the end of the recording; |F| mean/max and the per-axis means (sensor resultant X, Y, Z).
+    None if the run is shorter than `end_residual_min_s` (the tester did not let go before stopping)."""
+    t = cols["t_unix_s"]
+    nl = released_mask(cols, settings)
+    if len(t) == 0 or not nl[-1]:
+        return None
+    i = len(nl) - 1
+    while i > 0 and nl[i - 1]:
+        i -= 1
+    dur = float(t[-1] - t[i])
+    if dur < float(settings["end_residual_min_s"]):
+        return None
+    F, g = cols["F_N"][i:], cols["gauge_N"][i:]
+    xyz = [_r(float(np.nanmean(cols[k][i:])), 4) for k in ("Fx_N", "Fy_N", "Fz_N")]
+    return {"t_unix_s": _r(float(t[i]), 6), "seconds": _r(dur, 3), "samples": int(len(F)), "sensor_mean_N": xyz,
+            "sensor_F_mean_N": _r(float(np.nanmean(F)), 4), "sensor_F_max_N": _r(float(np.nanmax(F)), 4),
+            "gauge_mean_N": _r(float(np.nanmean(g)), 4)}
+
+
+def map_points(metrics: pd.DataFrame, points) -> Dict[str, Any]:
+    """Data of the maps: the test points with enough samples → x, y, mean |e| %, ids."""
+    by_id = {r["id"]: r for r in metrics[metrics["scope"] == "point"].to_dict(orient="records")}
+    ok = lambda v: v is not None and np.isfinite(v)
+    keep = [p for p in points if by_id.get(p.id, {}).get("enough") and ok(by_id[p.id].get("abs_err_pct"))]
+    return {"x": np.array([p.x_mm for p in keep], dtype=float), "y": np.array([p.y_mm for p in keep], dtype=float),
+            "err": np.array([by_id[p.id]["abs_err_pct"] for p in keep], dtype=float), "ids": [p.id for p in keep]}
+
+
+def error_map_summary(metrics: pd.DataFrame, points, settings: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Per k in `err_levels`: points and share of the tested area with mean |e| % < k."""
+    d = map_points(metrics, points)
+    out = []
+    for k in settings["err_levels"]:
+        r = usable_summary(d["x"], d["y"], d["err"], float(k))
+        r["points_ok_ids"] = [i for i, e in zip(d["ids"], d["err"]) if e < float(k)]
+        out.append(r)
+    return out
 
 
 def _records(df: pd.DataFrame) -> List[Dict[str, Any]]:
@@ -314,10 +392,14 @@ def load_result(folder: Union[str, Path]) -> Optional[BenchResult]:
     if not p.is_file() or not (folder / "samples.csv").is_file():
         return None
     result = json.loads(p.read_text(encoding="utf-8"))
-    samples = pd.read_csv(folder / "samples.csv", dtype={"sensor": str, "zone": str}, keep_default_na=False,
+    if int(result.get("analysis_version", 0)) < ANALYSIS_VERSION:
+        return None   # written by an older analysis (zones, no sensitivity fit): re-analyze
+    samples = pd.read_csv(folder / "samples.csv", dtype={"sensor": str, "point": str}, keep_default_na=False,
                           na_values=[""])
     samples["sensor"] = samples["sensor"].fillna("").astype(str)
-    samples["zone"] = samples["zone"].fillna("").astype(str)
+    if "point" not in samples.columns:   # results written before test points
+        samples["point"] = ""
+    samples["point"] = samples["point"].fillna("").astype(str)
     metrics = pd.DataFrame(result["metrics"])
     ct = pd.DataFrame(result["crosstalk"]) if result.get("crosstalk") else None
     return BenchResult(folder, samples, metrics, ct, result, list(result.get("warnings", [])))

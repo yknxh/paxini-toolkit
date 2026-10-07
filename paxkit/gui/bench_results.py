@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QListWidgetItem
 from ..bench import BenchResult, analyze_session, load_result
 from ..bench.analyze import read_meta
 from ..bench.plots import lag_text
-from ..bench.report import METRIC_LABELS, figures
+from ..bench.report import METRIC_LABELS, figures, noload_lines
 from ..paths import data_path
 from . import theme
 
@@ -151,8 +151,8 @@ class BenchResults(QWidget):
         if res is None:
             self._clear()
             meta = read_meta(folder)
-            self.summary.setText(f"<b>{folder.name}</b><br>No analysis result (status {meta.get('status', '-')}). "
-                                 "\"Re-analyze\" analyzes the recorded files.")
+            self.summary.setText(f"<b>{folder.name}</b><br>No analysis result, or one from an older version "
+                                 f"(status {meta.get('status', '-')}). \"Re-analyze\" analyzes the recorded files.")
             return
         self.show_result(res, refresh=False)
 
@@ -182,7 +182,6 @@ class BenchResults(QWidget):
         sens = "; ".join(
             f"{s['label']} {s.get('model')} {s['rate_hz']} Hz, residual lag {lag_text(s)}" for s in r["sensors"])
         warn = "".join(f"<li>{w}</li>" for w in r["warnings"])
-        nl = r.get("noload_check") or {}
         m = res.metrics.iloc[0].to_dict() if len(res.metrics) else {}
         self.summary.setText(
             f"<b>{res.folder.name}</b> — recorded {r.get('duration_s')} s, gauge samples {c['gauge_samples']}, "
@@ -192,8 +191,7 @@ class BenchResults(QWidget):
             f"— no pass/fail verdict<br>"
             f"<b>Overall (all contact samples): bias {_fmt(m.get('bias_contact_N'))} N, SD {_fmt(m.get('sd_contact_N'))} N, "
             f"RMSE {_fmt(m.get('rmse_contact_N'))} N</b><br>"
-            + (f"No-load check: gauge {nl.get('gauge_mean_N')} N, sensor |F| {nl.get('sensor_F_mean_N')} N<br>" if nl else
-               "No-load check: not done<br>")
+            + "No-load — " + "<br>No-load — ".join(noload_lines(r)) + "<br>"
             + (f"<span style='color:{theme.WARN}'>Warnings</span><ul style='margin:0'>{warn}</ul>" if warn else ""))
         self._fill_table(res)
         for rel, title, fig in figures(res, "dark"):
@@ -212,10 +210,10 @@ class BenchResults(QWidget):
         self.table.setRowCount(len(rows))
         multi = len(res.sensors) > 1
         for i, r in enumerate(rows):
-            thin = r["scope"] == "zone" and not bool(r.get("enough"))
+            thin = r["scope"] == "point" and not bool(r.get("enough"))
             for j, (k, _) in enumerate(METRIC_LABELS):
                 if k == "name":
-                    v = (f"{r['sensor']} / " if multi and r["scope"] == "zone" else "") + str(r["name"])
+                    v = (f"{r['sensor']} / " if multi and r["scope"] == "point" else "") + str(r["name"])
                 else:
                     v = r.get(k)
                     v = None if isinstance(v, float) and v != v else v
@@ -223,7 +221,7 @@ class BenchResults(QWidget):
                 it.setTextAlignment(Qt.AlignVCenter | (Qt.AlignLeft if k == "name" else Qt.AlignRight))
                 if thin:
                     it.setForeground(QColor(theme.MUTED))
-                if r["scope"] != "zone":
+                if r["scope"] != "point":
                     f = it.font()
                     f.setBold(True)
                     it.setFont(f)

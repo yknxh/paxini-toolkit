@@ -1,4 +1,5 @@
-"""Gauge test (plan P6-6 verification): point model/zones, synthetic session analysis, re-analysis determinism, coverage, session recording."""
+"""Gauge test (plan P6-6 verification): point model, synthetic session analysis, re-analysis determinism, coverage, session recording.
+Test points (location, sensitivity, error map) are in test_bench_points.py."""
 import json
 import time
 from pathlib import Path
@@ -7,7 +8,7 @@ import numpy as np
 import pytest
 
 from bench_synth import START, SynthSensor, make_session
-from paxkit.bench import BenchSession, Coverage, analyze_session, bench_settings, load_result, load_zones, noload_check
+from paxkit.bench import BenchSession, Coverage, analyze_session, bench_settings, load_result, noload_check
 from paxkit.bench.pairing import SensorSeries, pair_sensor, window_slopes
 from paxkit.buffers import TimeSeriesBuffer
 from paxkit.device.frames import Frame
@@ -21,7 +22,7 @@ from paxkit.recording.reader import read_log
 PAXTEST_GEOM = Path(__file__).resolve().parents[2] / "paxini-test-windows/paxtest/devices/geometry"
 
 
-# ── point model / zones ──
+# ── point model ──
 @pytest.mark.parametrize("label,old,n,m", [("S1813E", "S1813E", 31, 660), ("S2015", "S2015E", 52, 1156)])
 def test_geometry_matches_paxtest(label, old, n, m):
     g = load_geometry(label)
@@ -44,17 +45,6 @@ def test_surface_values_and_cop():
     assert np.isnan(g.cop(np.zeros(31))).all()
 
 
-@pytest.mark.parametrize("label", ["S1813E", "S2015"])
-def test_zones_cover_every_taxel_once(label):
-    zs = load_zones(label)
-    allt = sorted(i for z in zs.zones for i in z.taxels)
-    assert allt == list(range(zs.geometry.n_taxels)) and len(zs.zones) == 7
-    assert {(z.row, z.col) for z in zs.zones} == {(0, 1)} | {(r, c) for r in (1, 2) for c in range(3)}
-    tz = np.zeros((1, zs.geometry.n_taxels))
-    tz[0, list(zs.zones[4].taxels)] = 20
-    assert zs.classify(tz, 5)[0] == 4 and zs.classify(tz * 0, 5)[0] == -1
-
-
 def test_window_slopes():
     t = np.arange(0, 2, 0.1)
     v = 3 * t + 1
@@ -75,25 +65,22 @@ def test_pairing_interpolates_and_drops_gaps():
 @pytest.fixture(scope="module")
 def usb_session(tmp_path_factory):
     d = tmp_path_factory.mktemp("bench") / "2026-10-05-100000_S1813E_A1"
-    make_session(d, [SynthSensor("A1", zone_bias={"tip": -0.5})], seconds=90, gauge_outliers=2)
+    make_session(d, [SynthSensor("A1")], seconds=90, gauge_outliers=2)
     return d, analyze_session(d)
 
 
 def test_synthetic_known_errors(usb_session):
     _, res = usb_session
-    m = res.metrics.set_index("id")
-    for zid, row in m[res.metrics.set_index("id")["scope"] == "zone"].iterrows():
-        if row["slope"] is None or np.isnan(row["slope"]):
-            continue
-        assert row["slope"] == pytest.approx(1.05, abs=0.01), zid
-        want = -0.3 if zid == "tip" else 0.2
-        assert row["intercept"] == pytest.approx(want, abs=0.06), zid
     o = res.metrics.iloc[0]
-    assert o["scope"] == "overall" and o["noload_mean_N"] == pytest.approx(0.1, abs=0.01)
+    assert o["scope"] == "overall" and len(res.metrics) == 1   # no test points selected → overall only
+    assert o["slope"] == pytest.approx(1.05, abs=0.01) and o["intercept"] == pytest.approx(0.2, abs=0.06)
+    # through-origin gain absorbs the +0.2 N offset: 1.05 + 0.2·Σg/Σg² over the 4/8/12 N holds
+    assert o["gain"] == pytest.approx(1.05 + 0.2 * 24 / 224, abs=0.01) and o["resid_sd_N"] < 0.15
+    assert o["noload_mean_N"] == pytest.approx(0.1, abs=0.01)
     s = res.sensors[0]
     assert s["model"] == "S1813E" and s["lag_s"] == pytest.approx(0.08, abs=0.011)
-    assert any("2 gauge outliers" in w for w in res.warnings)
-    assert sum(bool(m.loc[z, "enough"]) for z in m.index if m.loc[z, "scope"] == "zone") >= 5
+    assert any("2 gauge outliers" in w for w in res.warnings) and any("No test points" in w for w in res.warnings)
+    assert res.points == [] and res.result["error_map"] is None and (res.samples["point"] == "").all()
 
 
 def test_lag_correction(usb_session):
@@ -120,9 +107,9 @@ def test_stable_filter_excludes_ramps(usb_session):
 
 def test_result_files_and_reanalysis_deterministic(usb_session, tmp_path):
     d, res = usb_session
-    for name in ("samples.csv", "metrics.csv", "result.json", "report.html", "plots/overall_error.png",
-                 "plots/zone_map.png", "plots/zones.png"):
+    for name in ("samples.csv", "metrics.csv", "result.json", "report.html", "plots/overall_error.png"):
         assert (d / name).is_file(), name
+    assert sorted(p.name for p in (d / "plots").iterdir()) == ["noload.png", "overall_error.png"]
     before = {n: (d / n).read_bytes() for n in ("samples.csv", "metrics.csv")}
     r1 = json.loads((d / "result.json").read_text(encoding="utf-8"))
     analyze_session(d)
@@ -169,7 +156,7 @@ def test_hand_crosstalk_simultaneous_and_channel_check(tmp_path):
     assert any("Channel mapping" in w for w in res.warnings)
     srows = res.metrics[res.metrics["scope"] == "sensor"]
     assert list(srows["name"]) == ["A1", "A2", "B1", "B2"] and (srows["slope"] - 1.05).abs().max() < 0.02
-    for name in ("crosstalk.csv", "plots/sensors_compare.png", "plots/crosstalk.png", "plots/B2/zones.png"):
+    for name in ("crosstalk.csv", "plots/sensors_compare.png", "plots/crosstalk.png", "plots/B2/overall_error.png"):
         assert (d / name).is_file(), name
 
 
@@ -179,30 +166,23 @@ def test_coverage_matches_analysis(tmp_path):
     res = analyze_session(d, write=False)
     log = read_log(d / res.result["sensor_csv"])
     key = next(iter(log.sensors))
-    fr, tz = log.force_raw(key), log.taxel_raw(key)
-    zs = load_zones("S1813E")
-    cov = Coverage(zs, res.settings)
+    fr = log.force_raw(key)
+    cov = Coverage(dict(res.settings, lag_correct=False))
     gt = np.loadtxt(d / "gauge.csv", delimiter=",", skiprows=1)
     gi = 0
     for i, t in enumerate(log.t):
-        grid = []
-        for v in tz[i]:
-            grid += [0, 0, int(v)]
-        cov.add_frame(Frame(t, 0, 0, "S1813E", tuple(int(x) for x in fr[i]), tuple(grid)))
+        cov.add_frame(Frame(t, 0, 0, "S1813E", tuple(int(x) for x in fr[i]), (0,) * 93))
         while gi < len(gt) and gt[gi, 0] <= t:
             cov.add_gauge(gt[gi, 0], gt[gi, 1])
             gi += 1
         if i % 250 == 0:
             cov.update()
     cov.update()
-    per_zone = res.samples[res.samples["stable"] == 1].groupby("zone").size()
-    ids = [z.id for z in zs.zones]
-    got = dict(zip(ids, cov.stable))
-    # the tail (last window) may not be processed yet
-    assert sum(got.values()) >= res.result["counts"]["stable"] - 10
-    for zid, n in per_zone.items():
-        assert abs(got[zid] - n) <= 10
-    assert cov.enough().sum() >= 1 and cov.total_stable > 50
+    # the tail (last window) may not be processed yet; the analysis also corrects the 80 ms gauge lag
+    ref = analyze_session(d, {"lag_correct": False}, write=False)
+    assert abs(cov.total_stable - ref.result["counts"]["stable"]) <= 10 and cov.total_stable > 50
+    assert abs(cov.total_contact - ref.result["counts"]["contact"]) <= 10
+    assert cov.no_point == cov.total_stable   # no test point selected
 
 
 def test_noload_check_warns():
@@ -213,6 +193,22 @@ def test_noload_check_warns():
     r = noload_check(sb, gb, 0.0, 3.0, 0.3)
     assert r["gauge_mean_N"] == pytest.approx(0.05) and r["sensor_F_mean_N"] == pytest.approx(0.5)
     assert len(r["warnings"]) == 1 and "Sensor" in r["warnings"][0]
+
+
+def test_end_residual():
+    from paxkit.bench.analyze import end_residual
+    s = bench_settings()
+    t = np.arange(0.0, 10.0, 0.1)
+    off = t >= 7.95                                  # hands off for the last 2 s; the gauge keeps a 0.2 N offset
+    cols = {"t_unix_s": t, "paired": np.ones(len(t), bool), "F_N": np.where(off, 0.6, 5.0),
+            "Fx_N": np.where(off, 0.5, 3.0), "Fy_N": np.where(off, 0.0, 0.0), "Fz_N": np.where(off, 0.3, 4.0),
+            "gauge_N": np.where(off, 0.2, 5.0), "slope_gauge": np.zeros(len(t)), "slope_sensor": np.zeros(len(t))}
+    cols["slope_gauge"][-1] = np.nan                 # last sample: too few points in the slope window
+    r = end_residual(cols, s)
+    assert r["seconds"] == pytest.approx(1.9) and r["sensor_F_mean_N"] == pytest.approx(0.6)
+    assert r["gauge_mean_N"] == pytest.approx(0.2) and r["sensor_mean_N"] == pytest.approx([0.5, 0.0, 0.3])
+    assert end_residual(cols, {**s, "end_residual_min_s": 3.0}) is None        # too short
+    assert end_residual({**cols, "gauge_N": np.full(len(t), 5.0)}, s) is None   # still pressing at the end
 
 
 # ── session recording (simulated sensor + gauge, real time) ──

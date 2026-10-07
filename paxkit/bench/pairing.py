@@ -1,20 +1,19 @@
-"""Pairing on gauge timestamps and sample classification (plan P6-2 2~5). Coverage during recording and post-analysis share these functions.
+"""Pairing on gauge timestamps and sample classification (plan P6-2 2~4). Coverage during recording and post-analysis share these functions.
 
 - The reference is the gauge sample (~10 Hz, the slower side). Sensor resultant force is linearly interpolated between the
-  surrounding frames (dropped if their gap > max_gap_s); taxels take the nearest frame.
+  surrounding frames (dropped if their gap > max_gap_s).
 - No lag correction here (sensor and gauge share the same PC clock).
 - Compared quantity: sensor resultant magnitude |F| = √(X² + Y² + Z²) [N] (raw × 0.1) vs gauge [N]. Error = |F| − gauge.
 - Contact: gauge ≥ contact_N. Stable: in contact, and the least-squares slopes of gauge and sensor |F| within ± stable_window_s
   are both ≤ stable_slope_N_per_s. No-load: gauge < noload_N with the same slope condition (released and held still).
+- Location is not derived from taxel values (2026-10-07 user decision): it is the test point the tester selected (`points.py`).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict
 
 import numpy as np
-
-from .zones import NO_ZONE, ZoneSet
 
 RAW_TO_N = 0.1
 
@@ -24,7 +23,7 @@ class SensorSeries:
     """Frame series of one sensor (post-analysis: from the CSV, during recording: from the sink)."""
     t: np.ndarray           # (n,) Unix seconds
     force_raw: np.ndarray   # (n, 3) resultant raw X, Y, Z
-    taxel_z: np.ndarray     # (n, N) taxel Z raw
+    taxel_z: np.ndarray     # (n, N) taxel Z raw (kept with the series; not used for pairing)
 
     def __post_init__(self) -> None:
         self.t = np.asarray(self.t, dtype=float)
@@ -81,15 +80,14 @@ def interp_force(gt: np.ndarray, s: SensorSeries, max_gap: float):
     return F, near
 
 
-def pair_sensor(gt: np.ndarray, gv: np.ndarray, s: SensorSeries, settings: Dict,
-                zones: Optional[ZoneSet] = None) -> Dict[str, np.ndarray]:
+def pair_sensor(gt: np.ndarray, gv: np.ndarray, s: SensorSeries, settings: Dict) -> Dict[str, np.ndarray]:
     """Pairs sensor values with each gauge sample and classifies them. Returns column name → array (length = number of gauge samples).
 
     Rows with `paired` False (no sensor pair) have NaN F values and contact/stable/noload all False.
     """
     gt = np.asarray(gt, dtype=float)
     gv = np.asarray(gv, dtype=float)
-    F, near = interp_force(gt, s, float(settings["max_gap_s"]))
+    F, _ = interp_force(gt, s, float(settings["max_gap_s"]))
     mag = np.sqrt((F ** 2).sum(axis=1))
     paired = np.isfinite(mag)
     half = float(settings["stable_window_s"])
@@ -101,21 +99,10 @@ def pair_sensor(gt: np.ndarray, gv: np.ndarray, s: SensorSeries, settings: Dict,
     stable = contact & (np.abs(slope_g) <= lim) & (np.abs(slope_s) <= lim)
     # no-load: only segments with the hand off and still (transitions right before pressing / after release are timing offsets, not sensor residual)
     noload = paired & (gv < float(settings["noload_N"])) & (np.abs(slope_g) <= lim) & (np.abs(slope_s) <= lim)
-
-    n = len(gt)
-    zone = np.full(n, NO_ZONE)
-    cop = np.full((n, 3), np.nan)
-    if zones is not None and s.taxel_z.shape[1] == zones.geometry.n_taxels:
-        has = near >= 0
-        tz = s.taxel_z[near[has]]
-        zone[has] = zones.classify(tz, float(settings["min_taxel_sum"]))
-        cop[has] = zones.geometry.cop(tz)
-        cop[zone == NO_ZONE] = np.nan   # no position (taxel Z sum too small)
     return {
         "t_unix_s": gt, "gauge_N": gv,
         "Fx_N": F[:, 0], "Fy_N": F[:, 1], "Fz_N": F[:, 2], "F_N": mag,
         "error_N": mag - gv, "error_z_N": F[:, 2] - gv,
         "paired": paired, "contact": contact, "stable": stable, "noload": noload,
         "slope_gauge": slope_g, "slope_sensor": slope_s,
-        "zone": zone, "cop_x_mm": cop[:, 0], "cop_y_mm": cop[:, 1], "cop_z_mm": cop[:, 2],
     }

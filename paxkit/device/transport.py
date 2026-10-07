@@ -18,14 +18,27 @@ class PortInfo:
     device: str
     description: str
     is_sensor: bool   # True if CH343 (not verified by sending commands)
+    serial_number: str = ""   # USB serial number (iSerial) of the USB-serial chip, "" if the OS reports none
 
 
 def list_serial_ports() -> List[PortInfo]:
     """Port list. Sensor candidates are marked by VID:PID only, so no command absent from PXSR is sent."""
     out = []
     for p in sorted(list_ports.comports(), key=lambda p: p.device):
-        out.append(PortInfo(p.device, p.description or "", (p.vid, p.pid) == CH343_VID_PID))
+        out.append(PortInfo(p.device, p.description or "", (p.vid, p.pid) == CH343_VID_PID, p.serial_number or ""))
     return out
+
+
+def port_serial_number(device: str) -> str:
+    """USB serial number of the port's USB-serial chip, read from the OS device list (no command is sent to the sensor).
+
+    Kept in the connection info for reference only: it does NOT identify the sensor (different sensors gave the same
+    CH343 serial `5C63009511`, 2026-10-07). "" if the port is unknown or the OS reports no serial.
+    """
+    for p in list_serial_ports():
+        if p.device == device:
+            return p.serial_number
+    return ""
 
 
 def default_sensor_port() -> Optional[str]:

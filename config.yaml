@@ -42,17 +42,20 @@ gauge:
 # Copied into meta.json for each session; re-analysis uses those values by default.
 bench:
   max_N: 15                 # guidance range, force bar warning line
-  contact_N: 0.5            # contact threshold (gauge)
+  contact_N: 1.0            # contact threshold (gauge); points below this are not counted (user decision 2026-10-06, was 0.5)
   noload_N: 0.2             # no-load threshold (gauge)
   noload_warn_N: 0.3        # no-load check warning
-  noload_check_s: 3.0       # no-load check duration
+  noload_check_s: 3.0       # no-load check duration (before the test, and after it: Stop → hands off → stop)
+  end_residual_min_s: 1.0   # residual at the end of the recording = trailing no-load run of at least this (s)
   stable_window_s: 0.2      # stability: slope within ± this time
   stable_slope_N_per_s: 2.0
   max_gap_s: 0.1            # max interpolation gap for pairing (sensor frames before/after)
   gauge_max_N: 100          # exclude gauge outliers
-  min_taxel_sum: 5          # raw; below this, no position
   bin_N: 1.0                # error plot bin
-  zone_min_samples: 20      # zone "enough" threshold (stable sample count)
+  pct_min_N: 1.0            # per test point: stable samples with gauge ≥ this → mean |e|/gauge % (main), reference gain fit
+  point_min_samples: 10     # test point "enough" threshold (samples in its error %); fewer → left out of the maps
+  point_min_range_N: 5.0    # warn if a point was pressed only below this
+  err_levels: [5, 10, 20, 30]   # error map: contours at these mean |e| % values; usable = mean |e| % < k (user decision 2026-10-07)
   lag_warn_s: 0.1           # warn if the remaining |lag| exceeds this (time to re-measure gauge latency_s)
   lag_correct: true         # measure the remaining lag per session by cross-correlation and correct before pairing (2026-10-05 user request)
   lag_min_r: 0.8            # no correction if the correlation is below this

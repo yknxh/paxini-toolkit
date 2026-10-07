@@ -11,7 +11,7 @@ Cross-platform (Windows / macOS / Linux) tools for **Paxini Gen3 tactile sensors
 - **Calibrate** (zero) the sensor with the same command sequence PXSR sends.
 - **Log data** to CSV files that are **byte-for-byte identical** to PXSR's own data logging output.
 - **Gauge test (bench):** record the sensor and a force gauge on the same clock while you press the sensor,
-  then get error plots and metrics overall and per sensor zone.
+  then get error plots, metrics and a map of where on the sensor its readings can be trusted.
 
 Everything is available both in a **GUI** (PySide6 + pyqtgraph) and a **command-line interface** for real data
 collection runs.
@@ -137,7 +137,7 @@ The values you are most likely to change:
 | `gauge.port` | Force gauge port. |
 | `gauge.baudrate`, `gauge.record_regex`, `gauge.invert`, `gauge.unit_scale` | Gauge serial format. Pressing must read as a positive force; set `invert: true` if your gauge reports compression as negative. |
 | `gauge.latency_s` | Fixed gauge latency subtracted from gauge timestamps (measure it with `tools/gauge_live_check.py --sensor`). |
-| `bench.*` | Gauge test settings: force range (`max_N`), contact / stability thresholds, bin width, zone sample minimum, lag correction. Each session stores a copy in its `meta.json`. |
+| `bench.*` | Gauge test settings: force range (`max_N`), contact / stability thresholds, bin width, test point thresholds and error map levels, lag correction. Each session stores a copy in its `meta.json`. |
 
 Serial port names differ by OS:
 
@@ -182,7 +182,7 @@ After `pip install -e .`, the `paxkit` command also starts the GUI.
 | **Data logging (left)** | Start/stop PXSR-format logging to `data/logs/`, with an optional memo saved in the sidecar file. |
 | **Live** tab | Resultant force X/Y/Z (and the gauge, if connected) over time, plus an optional taxel heatmap. |
 | **Calibration** tab | Send the calibration command and show the result (acknowledged / failed / no reply) and the force before and after. |
-| **Test** tab | Gauge test: prepare → no-load check / calibration → record → stop and analyze, with a live zone coverage map. |
+| **Test** tab | Gauge test: prepare → no-load check / calibration → record → stop and analyze. Click the sensor drawing to choose the test point you press next; each point shows its sample count and mean error % live. |
 | **Results** tab | Browse past gauge test sessions, view metrics and plots, re-analyze. |
 
 If sensor reception stalls, any running recording is saved up to that point and stopped, and a notice is shown.
@@ -259,13 +259,18 @@ python -m paxkit bench --label A1                      # interactive: no-load ch
 python -m paxkit bench --label A1 --calibrate          # calibrate before the no-load check
 python -m paxkit bench --label A1 --duration 240 -y    # fixed 4-minute recording, no prompts
 python -m paxkit bench --label A1 --no-analyze         # record only
+python -m paxkit bench --label A1 --point t14          # first test point on taxel 14
 ```
 
 Steps: connect the sensor and gauge, optionally calibrate, run the **no-load check** (hands off for a few seconds),
-then **record** while you press the sensor. The status line shows the gauge force, sensor |F|, the number of
-stable samples and how many zones have enough data. It warns when the force exceeds `bench.max_N`.
-After stopping, it prints the zone coverage table, analyzes the session and prints the main metrics plus the
-path to `report.html`. See [Gauge test (bench)](#gauge-test-bench).
+then **record** while you press the sensor. Test points are typed instead of clicked: `x y` in mm (top view),
+`t<n>` (on taxel n), `P<n>` (an earlier point) or `-` (no point), then Enter, at any time while recording.
+The status line shows the gauge force, sensor |F|, the number of stable samples and the current point's samples and
+mean error %. It warns when the force exceeds `bench.max_N`.
+When the recording ends (Ctrl+C or `--duration`), a **post-test no-load check** runs first: take your hands off
+for `noload_check_s` (3 s) while it still records (Ctrl+C again skips it; `--skip-noload` skips both checks).
+After stopping, it prints the per-point tally, analyzes the session and prints the main metrics, the per-point
+results and the usable-region summary, plus the path to `report.html`. See [Gauge test (bench)](#gauge-test-bench).
 
 ### `analyze`: (re)analyze sessions
 
@@ -290,9 +295,15 @@ The gauge test measures how well the sensor's resultant force |F| matches a refe
 2. *(Optional)* Calibrate with the sensor unloaded.
 3. **No-load check**: hands off both devices for a few seconds. The values are recorded in `meta.json` and warnings
    are shown. They are never used to correct data.
-4. **Record**: press the sensor surface at many different positions with forces between 0 and `max_N`
-   (15 N by default). Hold each press still for about 1 s, then change the force slowly, and move on. Keep the gauge
-   tip normal to the surface. Continue (typically 3-5 min) until every zone has enough data.
+4. **Record** by test point: click a spot on the sensor drawing (it becomes P1, P2, ...), then press exactly that
+   spot with forces between 0 and `max_N` (15 N by default): hold each press about 1 s, change the force slowly,
+   release, press again a few times. Then click the next spot. Clicking an existing point selects it again; clicking
+   outside the sensor means "no point". Keep the gauge tip normal to the surface. Spread the points over the surface;
+   a point needs `point_min_samples` (10) stable samples.
+5. **Stop**: take your hands off when asked. The recording continues for `noload_check_s` (3 s) as a **post-test
+   no-load check**, then stops and is analyzed. The report shows the residual before and after the test, and the
+   residual at the end of the recording found in the data (last hands-off stretch of at least `end_residual_min_s`).
+   Cancel stops at once without it.
 5. Stop. The session is analyzed automatically.
 
 **Analysis**:
@@ -301,10 +312,24 @@ The gauge test measures how well the sensor's resultant force |F| matches a refe
   The residual sensor-gauge lag is measured per session by cross-correlation and corrected
   (`bench.lag_correct`).
 - Samples are classified as *contact* (gauge above `contact_N`) and *stable* (force slope below
-  `stable_slope_N_per_s`). Each sample is assigned to a **sensor zone** from the taxel distribution:
-  7 zones = tip + (middle, root) × (left side, top, right side).
-- Error = |F| − gauge (N). Reported per session and per zone: bias, SD, RMSE (also as %FS), MAE, P95, max |e|,
+  `stable_slope_N_per_s`). Each sample is located at the **test point** selected at that time. Location is never
+  derived from taxel values (they can show force where nothing was pressed); sessions without test points get
+  overall results only.
+- Error = |F| − gauge (N). Reported overall and per test point: bias, SD, RMSE (also as %FS), MAE, P95, max |e|,
   linear fit |F| = a·gauge + b with R², the same for all contact samples, and the no-load residual.
+- **Mean error % per test point** (the main figure): the mean of 100·|e| / gauge over its stable samples with
+  gauge ≥ `pct_min_N` (1 N). The signed mean (100·e / gauge, negative = reads low) is reported next to it. How the error
+  is distributed (e.g. reads high at light forces and low at strong ones) is read from `points.png`. RMSE grows with
+  the force range pressed, so it is reported but not used to compare points. For reference only: the line through
+  the origin |F| = gain·gauge (gain, 100·(gain − 1) %, scatter around it).
+- **Usable region at k**: mean error % < k, for each k in `err_levels` (5, 10, 20, 30 %): the number of points, and the
+  share of the tested area (values interpolated linearly between the points, never beyond them); judge by the points,
+  the area is a guide.
+- Figures: `overall_error.png` (all samples), `error_map.png` (mean error % map, colored in bands at the k values), `points.png` (per
+  test point, the error |F| − gauge (N) of every sample vs the gauge force, grouped by sensor zone: tip, middle and
+  root × left side, top, right side; each point has its own color, each zone panel shows its mean error %),
+  `noload.png` (sensor residual per axis X, Y, Z: over the recording while nothing is pressed, and before the test /
+  end of the recording / after the test).
 - No pass/fail judgement is made, and no correction is ever applied to recorded data.
 
 ---
@@ -322,11 +347,11 @@ data/
 ├─ bench/<YYYY-MM-DD-HHMMSS>_<model>_<label>/
 │  ├─ <timestamp>.csv / .json    sensor recording (same format as data/logs)
 │  ├─ gauge.csv                  t_unix_s,force_N
-│  ├─ meta.json                  settings, devices, events (no-load check, calibration)
-│  ├─ samples.csv                paired samples (gauge, |F|, error, contact, stable, zone, CoP)
-│  ├─ metrics.csv                metrics: overall and per zone
-│  ├─ result.json                metrics + settings + warnings
-│  ├─ plots/                     overall_error.png, zone_map.png, zones.png
+│  ├─ meta.json                  settings, devices, events (no-load checks before/after, calibration, test points)
+│  ├─ samples.csv                paired samples (gauge, |F|, error, contact, stable, test point)
+│  ├─ metrics.csv                metrics: overall and per test point
+│  ├─ result.json                metrics + settings + warnings + test points + error map summary
+│  ├─ plots/                     overall_error.png, error_map.png, points.png, noload.png
 │  └─ report.html                self-contained report (tables + embedded plots)
 └─ state.json                    last sensor type (used like PXSR's saved specification)
 ```
@@ -391,6 +416,6 @@ python -m pytest                     # run the test suite
   installed, some tests also run PXSR's original JavaScript as a reference (`tools/pxsr_js.py`). Elsewhere they are
   skipped.
 - Helper scripts in `tools/`: `usb_live_check.py` (sensor protocol check), `gauge_live_check.py` (gauge check and
-  sensor-gauge lag), `bench_analyze.py` (re-analysis), `make_zones.py` (zone definitions),
+  sensor-gauge lag), `bench_analyze.py` (re-analysis),
   `extract_geometry.py` (taxel geometry from PXSR), `usbpcap_extract.py` (USB capture parsing).
 - Line endings are fixed by `.gitattributes` (text LF, `.bat` CRLF, fixtures untouched).

@@ -2,7 +2,7 @@
 
 The sensor CSV is written with the same `CsvRecorder` as real recordings (PXSR format). The load L(t) is a trapezoid whose
 position (taxel center) and force change with each press (ramp up 0.6 s · hold 1.2 s · ramp down 0.6 s · rest 0.6 s).
-Sensor |F| = gain·L + bias (+ zone_bias_N when pressing that zone), no-load is residual_N, sensor timestamps lag by delay_s.
+Sensor |F| = gain·L + bias (+ taxel_bias[c] when pressing taxel c), no-load is residual_N, sensor timestamps lag by delay_s.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import numpy as np
 
 from paxkit.bench.session import GAUGE_FILE, META_FILE
 from paxkit.bench.settings import bench_settings
-from paxkit.bench.zones import load_zones
+from paxkit.device.geometry import load_geometry
 from paxkit.device.frames import Frame
 from paxkit.recording import CsvRecorder
 
@@ -33,7 +33,7 @@ class SynthSensor:
     gain: float = 1.05
     bias_N: float = 0.2
     residual_N: float = 0.1
-    zone_bias: Dict[str, float] = field(default_factory=dict)   # zone id → extra error N
+    taxel_bias: Dict[int, float] = field(default_factory=dict)   # pressed taxel → extra error N
 
 
 def load_profile(t: np.ndarray, levels=(4.0, 8.0, 12.0)):
@@ -65,7 +65,7 @@ def make_session(folder: Path, sensors: List[SynthSensor], *, seconds: float = 1
     folder.mkdir(parents=True, exist_ok=True)
     t0 = START.timestamp()
     schedule = schedule or (lambda k: 0)
-    zsets = [load_zones(s.model) for s in sensors]
+    geoms = [load_geometry(s.model) for s in sensors]
 
     # gauge
     gt_rel = np.arange(0.0, seconds, 1.0 / gauge_hz) + 0.013
@@ -87,7 +87,7 @@ def make_session(folder: Path, sensors: List[SynthSensor], *, seconds: float = 1
         who = schedule(int(k))
         also = (who + 1) % len(sensors) if simultaneous_every and k % simultaneous_every == simultaneous_every - 1 else None
         for i, s in enumerate(sensors):
-            g = zsets[i].geometry
+            g = geoms[i]
             n = g.n_taxels
             c = (int(k) * 7) % n
             if i == who or i == also:
@@ -95,8 +95,7 @@ def make_session(folder: Path, sensors: List[SynthSensor], *, seconds: float = 1
             else:
                 load = crosstalk * l
             if load > 0:
-                zid = zsets[i].zones[zsets[i].taxel_zone()[c]].id
-                F = s.gain * load + s.bias_N + s.zone_bias.get(zid, 0.0) if (i == who or i == also) else load
+                F = s.gain * load + s.bias_N + s.taxel_bias.get(c, 0.0) if (i == who or i == also) else load
                 d2 = ((g.taxels - g.taxels[c]) ** 2).sum(axis=1)
                 w = np.exp(-d2 / (2 * 2.5 ** 2))
                 tz = [int(min(255, round(load * 10 * 0.6 * x))) for x in w] if (i == who or i == also) else [0] * n

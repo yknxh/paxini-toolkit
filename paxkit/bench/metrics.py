@@ -1,5 +1,10 @@
 """Error metrics (plan P6-2 6). Reports stable-sample metrics together with metrics over all contact samples (bias·SD·RMSE)
 (2026-10-06 user decision: plot all contact samples, colored stable/unstable). Z-only values are for reference.
+Main per-point figure (2026-10-07 user decision): `abs_err_pct` = mean(100·|e| / gauge) over the stable samples with
+gauge ≥ `pct_min_N` (`n_fit` of them, `points.error_pct`); `bias_pct` = the signed mean. The detailed error distribution is
+read from `points.png` (per-sample error |F| − gauge in N vs gauge).
+For reference only: the line through the origin |F| = gain·gauge over the same samples (`gain`, `gain_err_pct` =
+100·(gain − 1), `resid_sd_N` = SD of |F| around that line).
 
 No pass/fail judgment (2026-10-05 user decision) — numbers only.
 The linear fit |F| = a·gauge + b and R² are only reported, never applied to the data.
@@ -10,11 +15,13 @@ from typing import Dict, Optional
 
 import numpy as np
 
+from .points import error_pct
+
 # metrics.csv column order (after scope, id, name)
 COLUMNS = [
-    "n", "enough", "gauge_min_N", "gauge_max_N", "bias_N", "sd_N", "rmse_N", "mae_N", "max_abs_N", "p95_abs_N",
+    "n", "enough", "gauge_min_N", "gauge_max_N", "n_fit", "gain", "gain_err_pct", "resid_sd_N", "bias_N", "sd_N", "rmse_N", "mae_N", "max_abs_N", "p95_abs_N",
     "rmse_pct_fs", "slope", "intercept", "r2",
-    "n_contact", "bias_contact_N", "sd_contact_N", "rmse_contact_N",
+    "n_contact", "bias_contact_N", "sd_contact_N", "rmse_contact_N", "bias_pct", "abs_err_pct",
     "bias_z_N", "rmse_z_N",
     "n_noload", "noload_mean_N", "noload_max_N",
 ]
@@ -57,16 +64,35 @@ def error_metrics(gauge: np.ndarray, F: np.ndarray, rated_N: float) -> Dict[str,
     return out
 
 
+def gain_fit(gauge: np.ndarray, F: np.ndarray):
+    """(gain, residual SD) of |F| = gain·gauge through the origin. None if fewer than 3 samples."""
+    g = np.asarray(gauge, dtype=float)
+    f = np.asarray(F, dtype=float)
+    ok = np.isfinite(g) & np.isfinite(f)
+    g, f = g[ok], f[ok]
+    sxx = float((g * g).sum())
+    if len(g) < 3 or sxx <= 0:
+        return None, None
+    a = float((g * f).sum()) / sxx
+    return a, float((f - a * g).std(ddof=1))
+
+
 def group_metrics(cols: Dict[str, np.ndarray], mask: np.ndarray, settings: Dict,
                   noload_mask: Optional[np.ndarray] = None) -> Dict[str, Optional[float]]:
-    """Metrics for one group (overall, zone, sensor). mask = samples in this group."""
+    """Metrics for one group (overall, sensor, test point). mask = samples in this group.
+    "enough" = at least `point_min_samples` samples for the sensitivity fit."""
     rated = float(settings["rated_N"])
     st = mask & cols["stable"]
     ct = mask & cols["contact"]
     m = error_metrics(cols["gauge_N"][st], cols["F_N"][st], rated)
-    m["enough"] = bool(m["n"] >= int(settings["zone_min_samples"]))
     c = error_metrics(cols["gauge_N"][ct], cols["F_N"][ct], rated)
     m.update(n_contact=c["n"], bias_contact_N=c["bias_N"], sd_contact_N=c["sd_N"], rmse_contact_N=c["rmse_N"])
+    pm = st & (cols["gauge_N"] >= float(settings.get("pct_min_N", 0.0)))
+    bp, ap = error_pct(cols["gauge_N"][pm], cols["error_N"][pm])
+    a, rsd = gain_fit(cols["gauge_N"][pm], cols["F_N"][pm])
+    m.update(n_fit=int(pm.sum()), gain=_r(a), gain_err_pct=_r(None if a is None else 100.0 * (a - 1.0)),
+             resid_sd_N=_r(rsd), bias_pct=_r(bp), abs_err_pct=_r(ap),
+             enough=bool(pm.sum() >= int(settings.get("point_min_samples", 10))))
     z = error_metrics(cols["gauge_N"][st], cols["Fz_N"][st], rated)
     m.update(bias_z_N=z["bias_N"], rmse_z_N=z["rmse_N"])
     if noload_mask is not None:

@@ -3,7 +3,11 @@
 - Recording can start only while both sensor and gauge are delivering values.
 - The no-load check is only logged (meta.json event, no value correction). Calibration is the same action as the Calibration tab
   (`CalibrationRun`, history.jsonl), and its result is also logged as a session event.
-- Recording view: gauge and sensor |F| overlaid plot, current force bar (max_N line, red above it), coverage map, elapsed time and sample counts.
+- Recording view: gauge and sensor |F| overlaid plot, current force bar (max_N line, red above it), test point map, elapsed time and sample counts.
+- Test points (default way to test, 2026-10-06): click a spot on the sensor drawing, then press that spot. Each selection is a
+  `point_select` event; the analysis locates samples at the selected point (`bench/points.py`). Clicking outside the sensor = no point.
+- Stop button: a post-test no-load check first (hands off for `noload_check_s`, still recording, `noload_after` event),
+  then the recording stops. Cancel, or a stop caused by a stall/disconnect, stops at once without it.
 - On stop, analysis runs in a separate thread and the result is passed via the `analyzed` signal. Cancel keeps only the recorded files (can be re-analyzed later).
 HAND (4 sensors, "next sensor") will be added after the HAND reader (P1b).
 """
@@ -19,7 +23,9 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QFormLayout, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
-from ..bench import BenchSession, Coverage, analyze_session, load_zones, noload_check
+from ..bench import NOLOAD_AFTER_EVENT, BenchSession, Coverage, analyze_session, noload_check
+from ..bench.points import SELECT_EVENT, PointSet, select_event
+from ..device.geometry import load_geometry
 from ..device.clock import RealClock
 from . import theme
 from .light_grid import LightGrid
@@ -27,9 +33,10 @@ from .live_view import step_xy
 from .sensor_map import SensorMap
 
 WINDOW_S = 10.0
-GUIDE = ("Press various spots on the sensor surface with forces of 0–{max:g} N. Hold each press for about 1 s, then change the force slowly, "
-         "and repeat while moving to new spots. Keep the gauge tip perpendicular to the pressed surface. Do not exceed {max:g} N. "
-         "Recommended 3–5 min, until every zone on the map is \"enough\" (green).")
+GUIDE = ("Click a spot on the sensor drawing (right), then press exactly that spot: hold the force still for about 1 s at "
+         "several levels spread over 0–{max:g} N (e.g. 2, 5, 8, 12 N), release, and repeat once or twice. Then click the next "
+         "spot. Keep the gauge tip perpendicular to the pressed surface and do not exceed {max:g} N. Spread the points over the "
+         "surface; a point needs ≥{n} stable samples (green). Clicking outside the sensor = no point (presses are not located).")
 
 
 def _receiving(dev, window: float = 1.0) -> bool:
@@ -39,7 +46,8 @@ def _receiving(dev, window: float = 1.0) -> bool:
     return t is not None and dev.clock.wall() - t < window
 
 NOLOAD_IDLE = "Not done yet (logged only; not used to correct values)"
-COVERAGE_IDLE = "Coverage: shown once recording starts"
+COVERAGE_IDLE = "Click the drawing to choose where you press"
+POINT_IDLE = "#5a5c62"
 
 
 class BenchPanel(QWidget):
@@ -62,9 +70,12 @@ class BenchPanel(QWidget):
         self.pending_events: List[Dict[str, Any]] = []   # preparation events (added to the session when recording starts)
         self.calibration_busy = lambda: False   # the main window replaces this with the Calibration tab's busy state (repeated-click lock)
         self._noload_t0: Optional[float] = None
+        self._after_t0: Optional[float] = None   # post-test no-load check running (Stop pressed)
         self._last_sensor = None   # last connected reader (a different one = new connection)
         self.analyzing = False
         self.root = None   # lets tests change the save location (None = data/bench)
+        self.point_set: Optional[PointSet] = None
+        self.current_point: Optional[str] = None
 
         # ── preparation ──
         prep = QGroupBox("1. Prepare")
@@ -95,14 +106,15 @@ class BenchPanel(QWidget):
 
         rec = QGroupBox("3. Record")
         rf = QVBoxLayout(rec)
-        guide = QLabel(GUIDE.format(max=float(self.settings["max_N"])))
+        guide = QLabel(GUIDE.format(max=float(self.settings["max_N"]), n=int(self.settings["point_min_samples"])))
         guide.setWordWrap(True)
         row2 = QHBoxLayout()
         self.start_btn = QPushButton("Start recording")
         self.start_btn.setProperty("primary", True)
         self.start_btn.clicked.connect(self.start_recording)
         self.stop_btn = QPushButton("Stop → analyze")
-        self.stop_btn.clicked.connect(lambda: self.stop_recording(cancel=False))
+        self.stop_btn.setToolTip("Hands off for a few seconds (post-test no-load check), then stop and analyze")
+        self.stop_btn.clicked.connect(self.request_stop)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setToolTip("Keep the recorded files without analyzing (can be re-analyzed later from the Results tab)")
         self.cancel_btn.clicked.connect(lambda: self.stop_recording(cancel=True))
@@ -156,10 +168,11 @@ class BenchPanel(QWidget):
 
         self.map = SensorMap()
         self.map.setMinimumWidth(240)
+        self.map.clicked.connect(self.pick_point)
         self.lbl_cov = QLabel(COVERAGE_IDLE)
         self.lbl_cov.setWordWrap(True)
         mapbox = QVBoxLayout()
-        mapbox.addWidget(QLabel("Coverage (stable samples per zone · force bins)"))
+        mapbox.addWidget(QLabel("Test points (click = press here next; label = stable samples · mean |error| %)"))
         mapbox.addWidget(self.map, 1)
         mapbox.addWidget(self.lbl_cov)
 
@@ -204,20 +217,87 @@ class BenchPanel(QWidget):
             self._noload_t0 = None
             self.lbl_noload.setText(NOLOAD_IDLE)
             self._clear_previous()
+            self._reset_points()
         if sensor is not None:
             self._last_sensor = sensor
+            self._sync_model()
         self._update_buttons()
 
     def _clear_previous(self) -> None:
-        """Clear the finished test's coverage map and status (files and the Results tab are untouched)."""
+        """Clear the finished test's points, map and status (files and the Results tab are untouched)."""
         if self.recording:
             return
+        if self.session is not None:   # a finished test's points belong to it; points chosen while preparing are kept
+            self._reset_points()
         self.session = None
         self.coverage = None
-        self.map.clear_zones()
-        self.lbl_cov.setText(COVERAGE_IDLE)
+        self._draw_points()
         if not self.analyzing:
             self.lbl_rec.setText("-")
+
+    # ── test points ──
+    def _sync_model(self) -> None:
+        """Drawing and point set follow the connected sensor's model (a model change drops the points)."""
+        s = self.sensor
+        if s is None or self.recording:
+            return
+        model = s.sensor_type.label
+        if self.map.model != model or self.point_set is None:
+            self.map.set_model(model)
+            g = load_geometry(model)
+            self.point_set = PointSet(g) if g is not None else None
+            self.current_point = None
+            self.pending_events = [e for e in self.pending_events if e["kind"] != SELECT_EVENT]
+            self._draw_points()
+
+    def _reset_points(self) -> None:
+        if self.point_set is not None:
+            self.point_set = PointSet(self.point_set.geometry)
+        self.current_point = None
+        self.pending_events = [e for e in self.pending_events if e["kind"] != SELECT_EVENT]
+        self._draw_points()
+
+    def pick_point(self, x: float, y: float) -> None:
+        """Map click: select (or create) the point at (x, y); outside the sensor = no point."""
+        ps = self.point_set
+        if ps is None or self.analyzing:
+            return
+        if self.session is not None and not self.recording:
+            self._clear_previous()   # the previous test is done: clicking starts the next one
+            ps = self.point_set
+        p = ps.pick(x, y)
+        pid = p.id if p is not None else None
+        if pid == self.current_point:
+            return
+        self.current_point = pid
+        t = self.clock.wall()
+        self.note_event(SELECT_EVENT, t, **select_event(p))
+        if self.recording and self.coverage is not None:
+            self.coverage.select_point(t, pid)
+        self._draw_points()
+        self._update_buttons()
+
+    def _draw_points(self) -> None:
+        ps = self.point_set
+        if ps is None:
+            self.map.show_points([])
+            return
+        cov = self.coverage
+        need = int(self.settings["point_min_samples"])
+        items = []
+        for p in ps.points:
+            _, n, pct = cov.point_stats(p.id) if cov is not None else (0, 0, None)
+            color = theme.OK if n >= need else (theme.WARN if n > 0 else POINT_IDLE)
+            text = p.id if cov is None else f"{p.id} {n}" + ("" if pct is None else f" · {pct:.0f}%")
+            items.append((p.x_mm, p.y_mm, text, color))
+        cur = ps.get(self.current_point)
+        self.map.show_points(items, (cur.x_mm, cur.y_mm) if cur is not None else None)
+        if not self.recording and cov is None and not ps.points:
+            self.lbl_cov.setText(COVERAGE_IDLE)
+        elif not self.recording and cov is None:
+            self.lbl_cov.setText(f"{len(ps.points)} points. Next press: "
+                                 + (f"{cur.id} ({cur.x_mm:.1f}, {cur.y_mm:.1f} mm)" if cur else
+                                    "no point selected — click the drawing"))
 
     def _on_label_changed(self, _text: str) -> None:
         if self.session is not None and not self.recording:
@@ -291,24 +371,58 @@ class BenchPanel(QWidget):
         sess = BenchSession(s, self.gauge, self.settings, label=self.label_edit.text().strip(), model=model,
                             sensor_info=self.sensor_info, gauge_info=self.gauge_info,
                             gauge_config=self.gauge_config, root=self.root)
+        # point selections while preparing only matter through the point selected at the start (written below)
         for e in self.pending_events:
+            if e["kind"] == SELECT_EVENT:
+                continue
             e = dict(e)
             kind, t = e.pop("kind"), e.pop("t")
             sess.note_event(kind, t, **e)
         self.pending_events = []
-        zs = load_zones(model)
-        self.coverage = Coverage(zs, self.settings)
-        self.map.set_model(model)
+        self.coverage = Coverage(self.settings)
+        self._sync_model()
+        cur = self.point_set.get(self.current_point) if self.point_set is not None else None
+        if cur is not None:   # selected before the start (also kept from the previous recording): holds from the start
+            t = time.time()
+            sess.note_event(SELECT_EVENT, t, **select_event(cur))
+            self.coverage.select_point(t, cur.id)
         sess.start()
         s.add_sink(self.coverage.add_frame)
         self.gauge.add_sink(self.coverage.add_gauge)
         self.session = sess
         self._update_buttons()
 
+    def request_stop(self) -> None:
+        """Stop button: post-test no-load check (hands off, still recording), then stop → analyze (`_finish_after`).
+        Stops at once if the sensor or gauge is not delivering values."""
+        if not self.recording or self._after_t0 is not None:
+            return
+        if not self.ready():
+            self.stop_recording(cancel=False)
+            return
+        self._after_t0 = self.clock.wall()
+        self._update_buttons()
+
+    def _finish_after(self) -> None:
+        t0, t1 = self._after_t0, self.clock.wall()
+        self._after_t0 = None
+        if not self.recording:
+            return
+        r = noload_check(self.sensor.buffer, self.gauge.buffer, t0, t1, float(self.settings["noload_warn_N"]))
+        self.note_event(NOLOAD_AFTER_EVENT, t0, **r)
+        g = "-" if r["gauge_mean_N"] is None else f"{r['gauge_mean_N']:+.2f} N"
+        s = "-" if r["sensor_F_mean_N"] is None else f"{r['sensor_F_mean_N']:.2f} N"
+        warn = r["warnings"]
+        color = theme.WARN if warn else theme.OK
+        text = f"After the test: gauge {g}, sensor |F| {s}" + (" — " + "; ".join(warn) if warn else " — OK")
+        self.lbl_noload.setText(f"<span style='color:{color}'>{text}</span>")
+        self.stop_recording(cancel=False)
+
     def stop_recording(self, cancel: bool = False, reason: str = "") -> None:
         sess = self.session
         if sess is None or sess.status != "recording":
             return
+        self._after_t0 = None   # cancel / forced stop during the post-test check: stop without it
         cov = self.coverage
         if self.sensor is not None and cov is not None:
             self.sensor.remove_sink(cov.add_frame)
@@ -354,7 +468,7 @@ class BenchPanel(QWidget):
         self.cal_btn.setEnabled(self.sensor is not None and _receiving(self.sensor) and not busy
                                 and not self.calibration_busy())
         self.start_btn.setEnabled(ready and not rec and not busy and bool(self.label_edit.text().strip()))
-        self.stop_btn.setEnabled(rec)
+        self.stop_btn.setEnabled(rec and self._after_t0 is None)
         self.cancel_btn.setEnabled(rec)
         self.label_edit.setEnabled(not rec)
 
@@ -362,6 +476,8 @@ class BenchPanel(QWidget):
         self._n += 1
         now = self.clock.wall()
         s, g = self.sensor, self.gauge
+        if s is not None and self._n % 10 == 0 and self.session is None:
+            self._sync_model()   # the sensor type is confirmed after connecting
         if s is not None:
             ok = _receiving(s)
             self.lbl_sensor.setText(f"{s.sensor_type.label}, {s.buffer.rate(now):.0f} Hz" if ok else "No values")
@@ -375,6 +491,8 @@ class BenchPanel(QWidget):
             self.lbl_gauge.setText("Not connected (Force gauge panel, left)")
         if self._noload_t0 is not None and now - self._noload_t0 >= float(self.settings["noload_check_s"]):
             self._finish_noload()
+        if self._after_t0 is not None and now - self._after_t0 >= float(self.settings["noload_check_s"]):
+            self._finish_after()
         if self._n % 5 == 0:
             self._update_buttons()
         self._draw(now)
@@ -407,23 +525,23 @@ class BenchPanel(QWidget):
         cov, sess = self.coverage, self.session
         cov.update()
         elapsed = now - (sess.started_at or now)
-        self.lbl_rec.setText(f"Recording {int(elapsed // 60)}:{int(elapsed % 60):02d} — sensor {sess.sensor_rows} rows, "
-                             f"gauge {sess.gauge_rows} samples → {sess.folder.name}")
-        zs = cov.zones
-        if zs is None:
-            self.lbl_cov.setText(f"Stable samples {cov.total_stable} (no zones defined for this sensor)")
-            return
-        enough = cov.enough()
-        need = int(self.settings["zone_min_samples"])
-        colors, labels = [], []
-        for k, z in enumerate(zs.zones):
-            n = int(cov.stable[k])
-            filled = "".join("■" if c > 0 else "□" for c in cov.bin_counts[k])
-            colors.append(theme.OK if enough[k] else (theme.WARN if n > 0 else "#5a5c62"))
-            labels.append(f"{n}\n{filled}")
-        self.map.show_zones(colors, labels)
-        b = cov.bins
-        self.lbl_cov.setText(
-            f"Stable samples {cov.total_stable} (contact {cov.total_contact}, no position {cov.no_zone}) · "
-            f"enough {int(enough.sum())}/{len(enough)} zones (≥{need} stable + ≥2 force bins) · "
-            f"■ = force bins {b[0]:g}–{b[1]:g} / {b[1]:g}–{b[2]:g} / ≥{b[2]:g} N")
+        if self._after_t0 is not None:
+            left = max(float(self.settings["noload_check_s"]) - (now - self._after_t0), 0.0)
+            self.lbl_rec.setText(f"<span style='color:{theme.WARN}'>Post-test no-load check: take your hands off the "
+                                 f"sensor and gauge… {left:.1f} s</span> (then the recording stops)")
+        else:
+            self.lbl_rec.setText(f"Recording {int(elapsed // 60)}:{int(elapsed % 60):02d} — sensor {sess.sensor_rows} rows, "
+                                 f"gauge {sess.gauge_rows} samples → {sess.folder.name}")
+        self._draw_points()
+        ps = self.point_set
+        need = int(self.settings["point_min_samples"])
+        done = sum(cov.point_stats(p.id)[1] >= need for p in ps.points) if ps is not None else 0
+        cur = ps.get(self.current_point) if ps is not None else None
+        if cur is not None:
+            n, nst, pct = cov.point_stats(cur.id)
+            now_txt = (f"pressing {cur.id}: contact {n}, stable {nst}"
+                       + ("" if pct is None else f", sensitivity error {pct:+.1f}% (before lag correction)"))
+        else:
+            now_txt = "<span style='color:%s'>no point selected — presses are not located; click the drawing</span>" % theme.WARN
+        self.lbl_cov.setText(f"{now_txt}<br>{len(ps.points) if ps else 0} points, {done} with ≥{need} stable samples · "
+                             f"contact {cov.total_contact}, stable {cov.total_stable}")

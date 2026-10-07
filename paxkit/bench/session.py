@@ -1,5 +1,6 @@
 """Gauge test session recording (plan P6-1, 4.2): `data/bench/YYYY-MM-DD-HHMMSS_<model>_<label>/`.
 
+
 - Sensor: the same `CsvRecorder` as regular logging (directory = session folder) → PXSR-identical CSV + `.json` sidecar.
 - Gauge: `gauge.csv` (`t_unix_s,force_N`, paxtest format). Timestamps use the same `clock.wall()` as the sensor.
 - `meta.json`: format version, connection/sensor/gauge info, all test settings, start/stop times, events (no-load check, calibration, etc.).
@@ -22,6 +23,7 @@ from ..paths import data_path
 from ..recording import CsvRecorder
 
 META_FORMAT = "paxkit-bench/1"
+NOLOAD_AFTER_EVENT = "noload_after"   # post-test no-load check (hands off before the recording stops, 2026-10-07)
 GAUGE_FILE = "gauge.csv"
 META_FILE = "meta.json"
 
